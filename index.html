@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Premarket Momentum Scanner</title>
+<style>html,body{margin:0;padding:0;background:#0A0E13}</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ============================================================
+   PREMARKET MOMENTUM — small-cap top gainers dashboard
+   Data: Alpaca Market Data API (free keys: alpaca.markets)
+   - Top gainers via /v1beta1/screener/stocks/movers
+   - 5s refresh on cards, live tick stream in advanced chart
+   ============================================================ */
+
+const DATA_URL = "/alpaca"; // proxied by server.js to data.alpaca.markets
+
+/* ---------------- palette ---------------- */
+const C = {
+  bg: "#0A0E13",
+  panel: "#10161E",
+  panel2: "#151D27",
+  border: "#1E2A38",
+  text: "#E7EEF5",
+  muted: "#7E8C9A",
+  dim: "#55636F",
+  up: "#2EBD85",
+  down: "#F6465D",
+  vwap: "#E8B54D",
+  ema8: "#5AC8FA",
+  ema20: "#B18CFF",
+  ema50: "#FF8A5C",
+  amber: "#E8B54D",
+};
+const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+/* ---------------- formatting ---------------- */
+const fp = (v, d) =>
+  v == null || isNaN(v)
+    ? "—"
+    : Number(v).toFixed(d != null ? d : v >= 100 ? 2 : v >= 1 ? 2 : 4);
+const fv = (v) => {
+  if (v == null || isNaN(v)) return "—";
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return String(Math.round(v));
+};
+const fpct = (v) =>
+  v == null || isNaN(v) ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+const ftime = (d) =>
+  new Date(d).toLocaleTimeString("en-US", {
+    hour12: false,
+    timeZone: "America/New_York",
+  });
+
+/* ---------------- time helpers (ET) ---------------- */
+function etOffsetMs() {
+  const now = new Date();
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return now.getTime() - et.getTime();
+}
+function todayETStartISO(hour) {
+  const off = etOffsetMs();
+  const etNow = new Date(Date.now() - off);
+  const d = new Date(etNow);
+  d.setHours(hour, 0, 0, 0);
+  return new Date(d.getTime() + off).toISOString();
+}
+const daysAgoISO = (n) => new Date(Date.now() - n * 864e5).toISOString();
+
+/* ---------------- indicators ---------------- */
+function emaSeries(vals, n) {
+  const k = 2 / (n + 1);
+  let e = null;
+  return vals.map((v) => {
+    e = e === null ? v : v * k + e * (1 - k);
+    return e;
+  });
+}
+function vwapSeries(bars) {
+  let pv = 0, vv = 0;
+  return bars.map((b) => {
+    const tp = (b.h + b.l + b.c) / 3;
+    pv += tp * b.v;
+    vv += b.v;
+    return vv ? pv / vv : b.c;
+  });
+}
+/* Support / resistance: pivot highs+lows from daily history, clustered */
+function findLevels(daily, price) {
+  if (!daily || daily.length < 10 || !price)
+    return { supports: [], resistances: [] };
+  const w = 3, pivots = [];
+  for (let i = w; i < daily.length - w; i++) {
+    let isH = true, isL = true;
+    for (let j = i - w; j <= i + w; j++) {
+      if (daily[j].h > daily[i].h) isH = false;
+      if (daily[j].l < daily[i].l) isL = false;
+    }
+    if (isH) pivots.push(daily[i].h);
+    if (isL) pivots.push(daily[i].l);
+  }
+  pivots.sort((a, b) => a - b);
+  const clusters = [];
+  for (const p of pivots) {
+    const c = clusters[clusters.length - 1];
+    if (c && (p - c.lo) / c.lo < 0.02) {
+      c.vals.push(p);
+      c.lo = Math.min(c.lo, p);
+    } else clusters.push({ vals: [p], lo: p });
+  }
+  const levels = clusters.map((c) => ({
+    price: c.vals.reduce((a, b) => a + b, 0) / c.vals.length,
+    touches: c.vals.length,
+  }));
+  const score = (l, dist) => l.touches * 2 - dist * 8;
+  const sup = levels
+    .filter((l) => l.price < price * 0.995)
+    .map((l) => ({ ...l, d: (price - l.price) / price }))
+    .sort((a, b) => score(b, b.d) - score(a, a.d))
+    .slice(0, 3)
+    .sort((a, b) => b.price - a.price);
+  const res = levels
+    .filter((l) => l.price > price * 1.005)
+    .map((l) => ({ ...l, d: (l.price - price) / price }))
+    .sort((a, b) => score(b, b.d) - score(a, a.d))
+    .slice(0, 3)
+    .sort((a, b) => a.price - b.price);
+  return { supports: sup, resistances: res };
+}
+
+/* ---------------- Alpaca fetch ---------------- */
+async function alpaca(path, params, keys) {
+  const qs = new URLSearchParams(params).toString();
+  const r = await fetch(`${DATA_URL}${path}${qs ? "?" + qs : ""}`, {
+    headers: {
+      "APCA-API-KEY-ID": keys.id.trim(),
+      "APCA-API-SECRET-KEY": keys.secret.trim(),
+    },
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`${r.status}: ${t.slice(0, 140) || r.statusText}`);
+  }
+  return r.json();
+}
+const normBar = (b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v });
+
+/* ---------------- canvas chart ---------------- */
+function drawChart(canvas, bars, opts) {
+  if (!canvas || !bars || bars.length === 0) return;
+  const o = opts || {};
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (!W || !H) return;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const padR = o.axes ? 56 : 4;
+  const padT = 6, padL = 4;
+  const volH = o.volume === false ? 0 : Math.round(H * 0.16);
+  const padB = (o.axes ? 20 : 4) + volH;
+  const pw = W - padL - padR, ph = H - padT - padB;
+
+  let lo = Infinity, hi = -Infinity;
+  for (const b of bars) { if (b.l < lo) lo = b.l; if (b.h > hi) hi = b.h; }
+  for (const s of o.lines || []) for (const v of s.vals) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (o.levels && o.fitLevels) for (const l of o.levels) { if (l.price < lo) lo = l.price; if (l.price > hi) hi = l.price; }
+  const span = Math.max(hi - lo, hi * 0.002) || 1;
+  lo -= span * 0.06; hi += span * 0.06;
+  const y = (p) => padT + ((hi - p) / (hi - lo)) * ph;
+  const n = bars.length;
+  const step = pw / n;
+  const cw = Math.max(1, Math.min(step * 0.65, 14));
+  const x = (i) => padL + i * step + step / 2;
+
+  /* grid + price axis */
+  if (o.axes) {
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = C.dim;
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    const ticks = 6;
+    for (let i = 0; i <= ticks; i++) {
+      const p = hi - ((hi - lo) * i) / ticks;
+      const yy = y(p);
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+      ctx.fillText(fp(p), W - padR + 6, yy + 3);
+    }
+    /* time axis */
+    const labEvery = Math.max(1, Math.floor(n / 6));
+    ctx.textAlign = "center";
+    for (let i = 0; i < n; i += labEvery) {
+      const d = new Date(bars[i].t);
+      const lab = o.daily
+        ? d.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+        : d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/New_York" });
+      ctx.fillText(lab, x(i), H - 6);
+    }
+    ctx.textAlign = "left";
+  }
+
+  /* volume */
+  if (volH > 0) {
+    let vmax = 0;
+    for (const b of bars) if (b.v > vmax) vmax = b.v;
+    const vy0 = H - (o.axes ? 20 : 4);
+    for (let i = 0; i < n; i++) {
+      const b = bars[i];
+      const hgt = vmax ? (b.v / vmax) * (volH - 2) : 0;
+      ctx.fillStyle = (b.c >= b.o ? C.up : C.down) + "55";
+      ctx.fillRect(x(i) - cw / 2, vy0 - hgt, cw, hgt);
+    }
+  }
+
+  /* S/R levels */
+  for (const l of o.levels || []) {
+    const yy = y(l.price);
+    if (yy < padT - 4 || yy > padT + ph + 4) continue;
+    ctx.strokeStyle = (l.kind === "res" ? C.down : C.up) + "AA";
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    if (o.axes) {
+      ctx.fillStyle = l.kind === "res" ? C.down : C.up;
+      ctx.font = `bold 10px ${MONO}`;
+      ctx.fillText(fp(l.price), W - padR + 6, yy - 4);
+      ctx.font = `10px ${MONO}`;
+    }
+  }
+
+  /* indicator lines */
+  for (const s of o.lines || []) {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.width || 1.2;
+    if (s.dash) ctx.setLineDash(s.dash);
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < n; i++) {
+      const v = s.vals[i];
+      if (v == null) continue;
+      if (!started) { ctx.moveTo(x(i), y(v)); started = true; }
+      else ctx.lineTo(x(i), y(v));
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+  }
+
+  /* candles */
+  for (let i = 0; i < n; i++) {
+    const b = bars[i];
+    const col = b.c >= b.o ? C.up : C.down;
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.moveTo(x(i), y(b.h)); ctx.lineTo(x(i), y(b.l)); ctx.stroke();
+    const yo = y(b.o), yc = y(b.c);
+    ctx.fillRect(x(i) - cw / 2, Math.min(yo, yc), cw, Math.max(1, Math.abs(yc - yo)));
+  }
+
+  /* last price marker */
+  const last = bars[n - 1];
+  const ly = y(last.c);
+  ctx.strokeStyle = C.text + "66";
+  ctx.setLineDash([2, 3]);
+  ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(W - padR, ly); ctx.stroke();
+  ctx.setLineDash([]);
+  if (o.axes) {
+    ctx.fillStyle = last.c >= last.o ? C.up : C.down;
+    ctx.fillRect(W - padR + 2, ly - 8, padR - 4, 16);
+    ctx.fillStyle = "#06090D";
+    ctx.font = `bold 10px ${MONO}`;
+    ctx.fillText(fp(last.c), W - padR + 6, ly + 3);
+  }
+
+  /* crosshair */
+  if (o.cross && o.cross.i != null && o.cross.i >= 0 && o.cross.i < n) {
+    const i = o.cross.i, b = bars[i];
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x(i), padT); ctx.lineTo(x(i), padT + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    const lines = [
+      `${new Date(b.t).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/New_York" })} ET`,
+      `O ${fp(b.o)}  H ${fp(b.h)}`,
+      `L ${fp(b.l)}  C ${fp(b.c)}`,
+      `Vol ${fv(b.v)}`,
+    ];
+    ctx.font = `10px ${MONO}`;
+    const bw = 148, bx = x(i) + bw + 12 > W - padR ? x(i) - bw - 12 : x(i) + 12;
+    ctx.fillStyle = "rgba(10,14,19,0.92)";
+    ctx.strokeStyle = C.border;
+    ctx.fillRect(bx, padT + 4, bw, 58);
+    ctx.strokeRect(bx, padT + 4, bw, 58);
+    ctx.fillStyle = C.text;
+    lines.forEach((ln, k) => ctx.fillText(ln, bx + 8, padT + 18 + k * 13));
+  }
+}
+
+/* ---------------- mini chart component ---------------- */
+function MiniChart({ bars, lines, levels }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    drawChart(ref.current, bars, { lines, levels, volume: true });
+  }, [bars, lines, levels]);
+  useEffect(() => {
+    const onR = () => drawChart(ref.current, bars, { lines, levels, volume: true });
+    window.addEventListener("resize", onR);
+    return () => window.removeEventListener("resize", onR);
+  });
+  return <canvas ref={ref} style={{ width: "100%", height: 130, display: "block" }} />;
+}
+
+/* ---------------- stat cell ---------------- */
+const Stat = ({ label, value, color }) => (
+  <div style={{ minWidth: 0 }}>
+    <div style={{ fontSize: 9, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>{label}</div>
+    <div style={{ fontFamily: MONO, fontSize: 12, color: color || C.text, whiteSpace: "nowrap" }}>{value}</div>
+  </div>
+);
+
+/* ---------------- gainer card ---------------- */
+function GainerCard({ g, bars, levels, onOpen }) {
+  const calc = useMemo(() => {
+    if (!bars || bars.length === 0) return null;
+    const closes = bars.map((b) => b.c);
+    const e8 = emaSeries(closes, 8), e20 = emaSeries(closes, 20), e50 = emaSeries(closes, 50);
+    const vw = vwapSeries(bars);
+    let hi = -Infinity, lo = Infinity, vol = 0;
+    for (const b of bars) { hi = Math.max(hi, b.h); lo = Math.min(lo, b.l); vol += b.v; }
+    return { e8, e20, e50, vw, hi, lo, vol,
+      lines: [
+        { vals: vw, color: C.vwap, width: 1.4 },
+        { vals: e8, color: C.ema8 },
+        { vals: e20, color: C.ema20 },
+        { vals: e50, color: C.ema50 },
+      ] };
+  }, [bars]);
+
+  const price = g.price;
+  const lvl = levels || { supports: [], resistances: [] };
+  const drawLevels = [
+    ...lvl.resistances.map((l) => ({ ...l, kind: "res" })),
+    ...lvl.supports.map((l) => ({ ...l, kind: "sup" })),
+  ];
+  const t1 = lvl.resistances[0];
+
+  return (
+    <div
+      onClick={() => onOpen(g.symbol)}
+      style={{
+        background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10,
+        padding: 14, cursor: "pointer", transition: "border-color .15s",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.borderColor = C.amber + "88")}
+      onMouseLeave={(e) => (e.currentTarget.style.borderColor = C.border)}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: 0.5 }}>{g.symbol}</span>
+          <span style={{ fontFamily: MONO, fontSize: 16, color: C.text }}>{fp(price)}</span>
+        </div>
+        <span style={{ fontFamily: MONO, fontSize: 16, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down }}>
+          {fpct(g.pct)}
+        </span>
+      </div>
+
+      {bars && bars.length > 0 ? (
+        <MiniChart bars={bars} lines={calc ? calc.lines : []} levels={drawLevels} />
+      ) : (
+        <div style={{ height: 130, display: "grid", placeItems: "center", color: C.dim, fontSize: 12 }}>
+          loading bars…
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "8px 10px", marginTop: 10 }}>
+        <Stat label="VWAP" value={calc ? fp(calc.vw[calc.vw.length - 1]) : "—"} color={C.vwap} />
+        <Stat label="Volume" value={calc ? fv(calc.vol) : "—"} />
+        <Stat label="High" value={calc ? fp(calc.hi) : "—"} color={C.up} />
+        <Stat label="Low" value={calc ? fp(calc.lo) : "—"} color={C.down} />
+        <Stat label="EMA 8" value={calc ? fp(calc.e8[calc.e8.length - 1]) : "—"} color={C.ema8} />
+        <Stat label="EMA 20" value={calc ? fp(calc.e20[calc.e20.length - 1]) : "—"} color={C.ema20} />
+        <Stat label="EMA 50" value={calc ? fp(calc.e50[calc.e50.length - 1]) : "—"} color={C.ema50} />
+        <Stat
+          label="Next target"
+          value={t1 ? `${fp(t1.price)} (${fpct(((t1.price - price) / price) * 100)})` : "—"}
+          color={C.amber}
+        />
+      </div>
+
+      {(lvl.resistances.length > 0 || lvl.supports.length > 0) && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+          {lvl.resistances.map((l, i) => (
+            <span key={"r" + i} style={{ fontFamily: MONO, fontSize: 10, color: C.down, background: C.down + "1A", border: `1px solid ${C.down}44`, borderRadius: 4, padding: "2px 6px" }}>
+              R{i + 1} {fp(l.price)} · {l.touches}×
+            </span>
+          ))}
+          {lvl.supports.map((l, i) => (
+            <span key={"s" + i} style={{ fontFamily: MONO, fontSize: 10, color: C.up, background: C.up + "1A", border: `1px solid ${C.up}44`, borderRadius: 4, padding: "2px 6px" }}>
+              S{i + 1} {fp(l.price)} · {l.touches}×
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- advanced full-screen chart ---------------- */
+const TFS = [
+  { key: "1Min", label: "1m", ms: 6e4 },
+  { key: "5Min", label: "5m", ms: 3e5 },
+  { key: "15Min", label: "15m", ms: 9e5 },
+  { key: "1Hour", label: "1h", ms: 36e5 },
+  { key: "1Day", label: "1D", ms: 864e5 },
+];
+const WINS = [
+  { key: "1D", label: "1D", days: 1 },
+  { key: "5D", label: "5D", days: 7 },
+  { key: "1M", label: "1M", days: 31 },
+  { key: "6M", label: "6M", days: 186 },
+  { key: "1Y", label: "1Y", days: 372 },
+];
+
+function AdvancedChart({ symbol, keys, feed, levels, initPct, onClose }) {
+  const [tf, setTf] = useState("1Min");
+  const [win, setWin] = useState("1D");
+  const [bars, setBars] = useState([]);
+  const [ticks, setTicks] = useState([]);
+  const [live, setLive] = useState(false);
+  const [show, setShow] = useState({ vwap: true, e8: true, e20: true, e50: true, sr: true });
+  const [cross, setCross] = useState(null);
+  const [err, setErr] = useState("");
+  const canvasRef = useRef(null);
+  const barsRef = useRef([]);
+  const wsRef = useRef(null);
+  barsRef.current = bars;
+
+  const tfObj = TFS.find((t) => t.key === tf);
+  const daily = tf === "1Day";
+
+  /* fetch bars on tf/window change */
+  useEffect(() => {
+    let dead = false;
+    setBars([]);
+    setErr("");
+    (async () => {
+      try {
+        const w = WINS.find((x) => x.key === win);
+        const start = win === "1D" && !daily ? todayETStartISO(4) : daysAgoISO(w.days);
+        const j = await alpaca("/v2/stocks/bars", {
+          symbols: symbol, timeframe: tf, start, limit: 10000, feed, adjustment: "split",
+        }, keys);
+        if (dead) return;
+        const raw = (j.bars && j.bars[symbol]) || [];
+        let bs = raw.map(normBar);
+        if (bs.length > 500) bs = bs.slice(-500);
+        setBars(bs);
+      } catch (e) { if (!dead) setErr(String(e.message || e)); }
+    })();
+    return () => { dead = true; };
+  }, [symbol, tf, win, feed]);
+
+  /* live ticks: websocket, with polling fallback */
+  useEffect(() => {
+    let poll = null, dead = false;
+    const applyTrade = (p, s, t) => {
+      setTicks((prev) => [{ p, s, t }, ...prev].slice(0, 40));
+      setBars((prev) => {
+        if (prev.length === 0 || daily) return prev;
+        const ms = tfObj.ms;
+        const bucket = Math.floor(t / ms) * ms;
+        const last = prev[prev.length - 1];
+        if (bucket <= last.t) {
+          const nb = { ...last, c: p, h: Math.max(last.h, p), l: Math.min(last.l, p), v: last.v + s };
+          return [...prev.slice(0, -1), nb];
+        }
+        return [...prev, { t: bucket, o: p, h: p, l: p, c: p, v: s }];
+      });
+    };
+    const startPolling = () => {
+      poll = setInterval(async () => {
+        try {
+          const j = await alpaca(`/v2/stocks/${symbol}/trades/latest`, { feed }, keys);
+          const tr = j.trade;
+          if (tr) applyTrade(tr.p, tr.s, new Date(tr.t).getTime());
+        } catch (e) {}
+      }, 2000);
+    };
+    try {
+      const ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${feed}`);
+      wsRef.current = ws;
+      ws.onopen = () => ws.send(JSON.stringify({ action: "auth", key: keys.id.trim(), secret: keys.secret.trim() }));
+      ws.onmessage = (ev) => {
+        let msgs; try { msgs = JSON.parse(ev.data); } catch { return; }
+        for (const m of msgs) {
+          if (m.T === "success" && m.msg === "authenticated") {
+            ws.send(JSON.stringify({ action: "subscribe", trades: [symbol] }));
+            setLive(true);
+          }
+          if (m.T === "error") { try { ws.close(); } catch {} }
+          if (m.T === "t" && m.S === symbol) applyTrade(m.p, m.s, new Date(m.t).getTime());
+        }
+      };
+      ws.onerror = () => { setLive(false); if (!poll && !dead) startPolling(); };
+      ws.onclose = () => { setLive(false); if (!poll && !dead) startPolling(); };
+    } catch { startPolling(); }
+    return () => {
+      dead = true;
+      if (poll) clearInterval(poll);
+      try { wsRef.current && wsRef.current.close(); } catch {}
+    };
+  }, [symbol, feed, tf]);
+
+  /* indicators */
+  const calc = useMemo(() => {
+    if (bars.length === 0) return null;
+    const closes = bars.map((b) => b.c);
+    const lines = [];
+    if (show.vwap && !daily) lines.push({ vals: vwapSeries(bars), color: C.vwap, width: 1.6 });
+    if (show.e8) lines.push({ vals: emaSeries(closes, 8), color: C.ema8, width: 1.3 });
+    if (show.e20) lines.push({ vals: emaSeries(closes, 20), color: C.ema20, width: 1.3 });
+    if (show.e50) lines.push({ vals: emaSeries(closes, 50), color: C.ema50, width: 1.3 });
+    return { lines };
+  }, [bars, show, daily]);
+
+  const drawLevels = show.sr && levels
+    ? [...levels.resistances.map((l) => ({ ...l, kind: "res" })), ...levels.supports.map((l) => ({ ...l, kind: "sup" }))]
+    : [];
+
+  /* redraw */
+  useEffect(() => {
+    drawChart(canvasRef.current, bars, {
+      lines: calc ? calc.lines : [], levels: drawLevels, axes: true, volume: true, daily, cross,
+    });
+  });
+  useEffect(() => {
+    const onR = () => drawChart(canvasRef.current, barsRef.current, { lines: calc ? calc.lines : [], levels: drawLevels, axes: true, volume: true, daily });
+    window.addEventListener("resize", onR);
+    return () => window.removeEventListener("resize", onR);
+  });
+
+  const onMove = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const n = bars.length;
+    if (!n) return;
+    const step = (rect.width - 60) / n;
+    setCross({ i: Math.max(0, Math.min(n - 1, Math.floor((px - 4) / step))) });
+  };
+
+  const last = bars[bars.length - 1];
+  const price = last ? last.c : null;
+  const Toggle = ({ k, label, color }) => (
+    <button
+      onClick={() => setShow((s) => ({ ...s, [k]: !s[k] }))}
+      style={{
+        background: show[k] ? color + "22" : "transparent",
+        border: `1px solid ${show[k] ? color : C.border}`,
+        color: show[k] ? color : C.dim, borderRadius: 5, padding: "3px 8px",
+        fontFamily: MONO, fontSize: 11, cursor: "pointer",
+      }}
+    >{label}</button>
+  );
+  const Seg = ({ items, val, set }) => (
+    <div style={{ display: "flex", gap: 2, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 6, padding: 2 }}>
+      {items.map((it) => (
+        <button key={it.key} onClick={() => set(it.key)}
+          style={{
+            background: val === it.key ? C.amber : "transparent",
+            color: val === it.key ? "#06090D" : C.muted, fontWeight: val === it.key ? 700 : 400,
+            border: "none", borderRadius: 4, padding: "4px 9px", fontFamily: MONO, fontSize: 11, cursor: "pointer",
+          }}
+        >{it.label}</button>
+      ))}
+    </div>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 50, display: "flex", flexDirection: "column" }}>
+      {/* header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", borderBottom: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 13 }}>← Back</button>
+        <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: 0.5 }}>{symbol}</span>
+        <span style={{ fontFamily: MONO, fontSize: 20 }}>{fp(price)}</span>
+        <span style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, color: (initPct || 0) >= 0 ? C.up : C.down }}>{fpct(initPct)}</span>
+        <span style={{ fontFamily: MONO, fontSize: 10, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "2px 8px" }}>
+          {live ? "● LIVE TICKS" : "● POLLING 2s"}
+        </span>
+        <div style={{ flex: 1 }} />
+        <Seg items={TFS} val={tf} set={setTf} />
+        <Seg items={WINS} val={win} set={setWin} />
+      </div>
+      {/* toggles */}
+      <div style={{ display: "flex", gap: 6, padding: "8px 16px", borderBottom: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+        <Toggle k="vwap" label="VWAP" color={C.vwap} />
+        <Toggle k="e8" label="EMA 8" color={C.ema8} />
+        <Toggle k="e20" label="EMA 20" color={C.ema20} />
+        <Toggle k="e50" label="EMA 50" color={C.ema50} />
+        <Toggle k="sr" label="S/R levels" color={C.amber} />
+        {err && <span style={{ color: C.down, fontSize: 11, fontFamily: MONO }}>{err}</span>}
+      </div>
+      {/* body */}
+      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+          {bars.length === 0 && !err && (
+            <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: C.dim }}>loading…</div>
+          )}
+          <canvas
+            ref={canvasRef}
+            onMouseMove={onMove}
+            onMouseLeave={() => setCross(null)}
+            style={{ width: "100%", height: "100%", display: "block", cursor: "crosshair" }}
+          />
+        </div>
+        {/* tick tape */}
+        <div style={{ width: 200, borderLeft: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <div style={{ padding: "8px 12px", fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderBottom: `1px solid ${C.border}` }}>
+            Time & sales
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+            {ticks.length === 0 && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>Waiting for trades…</div>}
+            {ticks.map((t, i) => {
+              const prev = ticks[i + 1];
+              const col = !prev || t.p === prev.p ? C.muted : t.p > prev.p ? C.up : C.down;
+              return (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 12px", fontFamily: MONO, fontSize: 11 }}>
+                  <span style={{ color: C.dim }}>{ftime(t.t)}</span>
+                  <span style={{ color: col }}>{fp(t.p)}</span>
+                  <span style={{ color: C.dim }}>{t.s}</span>
+                </div>
+              );
+            })}
+          </div>
+          {levels && (
+            <div style={{ borderTop: `1px solid ${C.border}`, padding: 12 }}>
+              <div style={{ fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 6 }}>Key levels</div>
+              {levels.resistances.map((l, i) => (
+                <div key={"r" + i} style={{ display: "flex", justifyContent: "space-between", fontFamily: MONO, fontSize: 11, color: C.down }}>
+                  <span>R{i + 1}</span><span>{fp(l.price)}</span>
+                  <span style={{ color: C.dim }}>{price ? fpct(((l.price - price) / price) * 100) : ""}</span>
+                </div>
+              ))}
+              {levels.supports.map((l, i) => (
+                <div key={"s" + i} style={{ display: "flex", justifyContent: "space-between", fontFamily: MONO, fontSize: 11, color: C.up }}>
+                  <span>S{i + 1}</span><span>{fp(l.price)}</span>
+                  <span style={{ color: C.dim }}>{price ? fpct(((l.price - price) / price) * 100) : ""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- main app ---------------- */
+function App() {
+  const [keys, setKeys] = useState({ id: "", secret: "" });
+  const [remember, setRemember] = useState(true);
+  const [feed, setFeed] = useState("iex");
+  const [maxPrice, setMaxPrice] = useState(20);
+  const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [err, setErr] = useState("");
+  const [gainers, setGainers] = useState([]);
+  const [barsMap, setBarsMap] = useState({});
+  const [levelsMap, setLevelsMap] = useState({});
+  const [selected, setSelected] = useState(null);
+  const [updated, setUpdated] = useState(null);
+  const dailyCache = useRef({});
+  const busy = useRef(false);
+
+  /* load saved keys */
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = localStorage.getItem("alpaca-keys");
+        if (raw) {
+          const v = JSON.parse(raw);
+          setKeys({ id: v.id || "", secret: v.secret || "" });
+          if (v.maxPrice) setMaxPrice(v.maxPrice);
+          if (v.feed) setFeed(v.feed);
+        }
+      } catch {}
+    })();
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (busy.current) return;
+    busy.current = true;
+    try {
+      /* 1 — top gainers */
+      const mv = await alpaca("/v1beta1/screener/stocks/movers", { top: 50 }, keys);
+      const top = (mv.gainers || [])
+        .filter((g) => g.price <= Number(maxPrice || 9999))
+        .slice(0, 10)
+        .map((g) => ({ symbol: g.symbol, price: g.price, pct: g.percent_change, change: g.change }));
+      const syms = top.map((g) => g.symbol);
+      if (syms.length === 0) { setGainers([]); setErr("No gainers matched the price filter — raise the max price."); return; }
+
+      /* 2 — intraday bars from 4:00 AM ET (premarket included) */
+      const bj = await alpaca("/v2/stocks/bars", {
+        symbols: syms.join(","), timeframe: "5Min", start: todayETStartISO(4), limit: 10000, feed,
+      }, keys);
+      const bm = {};
+      for (const s of syms) bm[s] = ((bj.bars && bj.bars[s]) || []).map(normBar);
+
+      /* 3 — refresh live price from snapshots */
+      try {
+        const sj = await alpaca("/v2/stocks/snapshots", { symbols: syms.join(","), feed }, keys);
+        for (const g of top) {
+          const sn = sj[g.symbol];
+          if (sn && sn.latestTrade) {
+            g.price = sn.latestTrade.p;
+            if (sn.prevDailyBar && sn.prevDailyBar.c)
+              g.pct = ((g.price - sn.prevDailyBar.c) / sn.prevDailyBar.c) * 100;
+          }
+        }
+      } catch {}
+
+      setGainers(top);
+      setBarsMap(bm);
+      setUpdated(new Date());
+      setErr("");
+
+      /* 4 — lazy: 1yr daily history → support/resistance (cached per symbol) */
+      for (const g of top) {
+        if (dailyCache.current[g.symbol]) {
+          setLevelsMap((m) => ({ ...m, [g.symbol]: findLevels(dailyCache.current[g.symbol], g.price) }));
+          continue;
+        }
+        alpaca("/v2/stocks/bars", {
+          symbols: g.symbol, timeframe: "1Day", start: daysAgoISO(372), limit: 400, feed, adjustment: "split",
+        }, keys)
+          .then((dj) => {
+            const db = ((dj.bars && dj.bars[g.symbol]) || []).map(normBar);
+            dailyCache.current[g.symbol] = db;
+            setLevelsMap((m) => ({ ...m, [g.symbol]: findLevels(db, g.price) }));
+          })
+          .catch(() => {});
+      }
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      busy.current = false;
+    }
+  }, [keys, maxPrice, feed]);
+
+  /* 5-second polling loop */
+  useEffect(() => {
+    if (!running || paused) return;
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, [running, paused, refresh]);
+
+  const connect = async () => {
+    setErr("");
+    if (!keys.id.trim() || !keys.secret.trim()) { setErr("Enter both the API key ID and secret."); return; }
+    try {
+      await alpaca("/v1beta1/screener/stocks/movers", { top: 1 }, keys);
+      if (remember) {
+        try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed })); } catch {}
+      }
+      setRunning(true);
+    } catch (e) {
+      setErr("Couldn't authenticate: " + String(e.message || e));
+    }
+  };
+
+  const sel = gainers.find((g) => g.symbol === selected);
+
+  /* ---------- setup screen ---------- */
+  if (!running) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui, sans-serif", display: "grid", placeItems: "center", padding: 20 }}>
+        <div style={{ width: "100%", maxWidth: 460 }}>
+          <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 2, color: C.amber, marginBottom: 8 }}>PREMARKET // 04:00 ET</div>
+          <h1 style={{ fontSize: 26, fontWeight: 800, margin: "0 0 6px" }}>Momentum Gainers</h1>
+          <p style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, margin: "0 0 20px" }}>
+            Live top-10 small-cap gainers with VWAP, EMAs, and support/resistance targets.
+            Powered by Alpaca market data — free keys at alpaca.markets (paper account works).
+          </p>
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 }}>
+              API key ID
+              <input value={keys.id} onChange={(e) => setKeys((k) => ({ ...k, id: e.target.value }))}
+                style={{ width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "9px 10px", fontFamily: MONO, fontSize: 13 }} />
+            </label>
+            <label style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 }}>
+              API secret
+              <input type="password" value={keys.secret} onChange={(e) => setKeys((k) => ({ ...k, secret: e.target.value }))}
+                style={{ width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "9px 10px", fontFamily: MONO, fontSize: 13 }} />
+            </label>
+            <div style={{ display: "flex", gap: 12 }}>
+              <label style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1, flex: 1 }}>
+                Max price (small-cap filter)
+                <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "9px 10px", fontFamily: MONO, fontSize: 13 }} />
+              </label>
+              <label style={{ fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1, flex: 1 }}>
+                Data feed
+                <select value={feed} onChange={(e) => setFeed(e.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "9px 10px", fontFamily: MONO, fontSize: 13 }}>
+                  <option value="iex">IEX (free)</option>
+                  <option value="sip">SIP (paid plan)</option>
+                </select>
+              </label>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.muted, cursor: "pointer" }}>
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+              Remember keys on this device
+            </label>
+            <button onClick={connect}
+              style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 6, padding: "11px 0", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+              Start scanning
+            </button>
+            {err && <div style={{ color: C.down, fontSize: 12, fontFamily: MONO }}>{err}</div>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ---------- dashboard ---------- */
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 10, background: C.bg + "F2", backdropFilter: "blur(6px)", borderBottom: `1px solid ${C.border}`, padding: "10px 18px", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.amber }}>PREMARKET // TOP 10 GAINERS</div>
+          <div style={{ fontSize: 17, fontWeight: 800 }}>Momentum Scanner</div>
+        </div>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>
+          ≤ ${maxPrice} · {feed.toUpperCase()} · {updated ? `updated ${ftime(updated)} ET` : "loading…"}
+        </span>
+        <button onClick={() => setPaused((p) => !p)}
+          style={{ background: paused ? C.up + "22" : "transparent", border: `1px solid ${paused ? C.up : C.border}`, color: paused ? C.up : C.muted, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
+          {paused ? "▶ Resume" : "❚❚ Pause"}
+        </button>
+        <button onClick={() => { setRunning(false); setPaused(false); }}
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 12 }}>
+          Settings
+        </button>
+      </div>
+
+      {err && (
+        <div style={{ margin: "12px 18px 0", padding: "8px 12px", background: C.down + "15", border: `1px solid ${C.down}55`, borderRadius: 6, color: C.down, fontSize: 12, fontFamily: MONO }}>
+          {err}
+        </div>
+      )}
+
+      <div style={{ padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))", gap: 14 }}>
+        {gainers.length === 0 && !err && (
+          <div style={{ color: C.dim, fontFamily: MONO, fontSize: 13 }}>scanning movers…</div>
+        )}
+        {gainers.map((g) => (
+          <GainerCard key={g.symbol} g={g} bars={barsMap[g.symbol]} levels={levelsMap[g.symbol]} onOpen={setSelected} />
+        ))}
+      </div>
+
+      <div style={{ padding: "0 18px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
+        Bars are 5-min from 4:00 AM ET including premarket · EMAs computed on the 5-min series · S/R from 1-year daily pivot clusters (touches shown as ×) · Data delayed per feed terms. Not financial advice.
+      </div>
+
+      {sel && (
+        <AdvancedChart
+          symbol={sel.symbol}
+          keys={keys}
+          feed={feed}
+          levels={levelsMap[sel.symbol]}
+          initPct={sel.pct}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
