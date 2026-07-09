@@ -8,12 +8,15 @@ const fs = require("fs");
 const path = require("path");
 
 const PORT = process.env.PORT || 8787;
-const ALPACA = "https://data.alpaca.markets";
+const ROUTES = {
+  "/alpaca": "https://data.alpaca.markets",     // market data
+  "/trading": "https://paper-api.alpaca.markets", // asset/listing lookups
+};
 
 const server = http.createServer(async (req, res) => {
-  // ---- proxy: /alpaca/* -> data.alpaca.markets/* (bypasses browser CORS) ----
-  if (req.url.startsWith("/alpaca/")) {
-    const target = ALPACA + req.url.slice("/alpaca".length);
+  const prefix = Object.keys(ROUTES).find((p) => req.url.startsWith(p + "/"));
+  if (prefix) {
+    const target = ROUTES[prefix] + req.url.slice(prefix.length);
     try {
       const r = await fetch(target, {
         headers: {
@@ -31,7 +34,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ---- static: serve index.html ----
   fs.readFile(path.join(__dirname, "index.html"), (err, data) => {
     if (err) {
       res.writeHead(500);
