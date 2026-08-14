@@ -134,10 +134,10 @@ try {
   else { subs = saved.subs || []; watch = saved.watch || []; }
 } catch (e) {}
 function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch })); } catch (e) {} }
-async function broadcast(title, bodyTxt) {
+async function broadcast(title, bodyTxt, key) {
   const dead = [];
   for (const s of subs) {
-    const code = await sendPush(s.sub, { title, body: bodyTxt });
+    const code = await sendPush(s.sub, { title, body: bodyTxt, key: key || "" });
     if (code === 404 || code === 410) dead.push(s.sub.endpoint);
   }
   if (dead.length) { subs = subs.filter((s) => !dead.includes(s.sub.endpoint)); saveSubs(); }
@@ -319,20 +319,50 @@ async function monitorTick() {
           if (monState.fired.has(trig.key)) continue;
           monState.fired.add(trig.key);
           console.log("PUSH:", trig.title);
-          await broadcast(trig.title, trig.body);
+          await broadcast(trig.title, trig.body, trig.key);
         }
       }
     }
   } catch (e) { console.log("monitor error:", String(e).slice(0, 120)); }
   saveMonState();
 }
-setInterval(monitorTick, 45000);
+const monitorTimer = setInterval(monitorTick, 45000);
+/* Render rolling deploys briefly run OLD + NEW instances together; the old
+   one must stop pushing the instant it is told to shut down */
+process.on("SIGTERM", () => {
+  clearInterval(monitorTimer);
+  try { saveMonState(); saveSubs(); } catch (e) {}
+  process.exit(0);
+});
+
+/* ============================ settings persistence ============================ */
+const SETTINGS_FILE = "/tmp/scanner-settings.json";
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
+function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
 
 /* ============================ static assets ============================ */
 const SW_JS = `self.addEventListener("push", (e) => {
-  let d = { title: "Scanner alert", body: "" };
+  let d = { title: "Scanner alert", body: "", key: "" };
   try { d = e.data.json(); } catch (err) {}
-  e.waitUntil(self.registration.showNotification(d.title, { body: d.body, icon: "/icon.png", badge: "/icon.png" }));
+  e.waitUntil((async () => {
+    /* DELIVERY-POINT DEDUPE: the same alert key is shown at most once per 24h
+       on this device, no matter how many times or from where it arrives
+       (overlapping server instances during deploys, restarts, retries). */
+    if (d.key) {
+      try {
+        const cache = await caches.open("alert-dedupe");
+        const u = "/dedupe/" + encodeURIComponent(d.key);
+        const hit = await cache.match(u);
+        if (hit) {
+          const ts = Number(await hit.text());
+          if (Date.now() - ts < 24 * 3600e3) return; /* duplicate — swallow */
+        }
+        await cache.put(u, new Response(String(Date.now())));
+      } catch (err) {}
+    }
+    await self.registration.showNotification(d.title, { body: d.body, icon: "/icon.png", badge: "/icon.png", tag: d.key || undefined });
+  })());
 });
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
@@ -389,6 +419,24 @@ const server = http.createServer(async (req, res) => {
   if (u === "/manifest.json") { res.writeHead(200, { "Content-Type": "application/manifest+json" }); res.end(MANIFEST); return; }
   if (u === "/icon.png") { res.writeHead(200, { "Content-Type": "image/png" }); res.end(ICON); return; }
 
+  if (u === "/settings" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(settings));
+    return;
+  }
+  if (u === "/settings" && req.method === "POST") {
+    try {
+      const b = JSON.parse(await readBody(req));
+      settings = { ...settings, ...b };
+      saveSettings();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
   if (u === "/push/pubkey") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ key: b64u(vapid.pubRaw) }));
@@ -440,7 +488,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (u === "/push/test" && req.method === "POST") {
-    await broadcast("🔔 Test alert", "Lock-screen push is working.");
+    await broadcast("🔔 Test alert", "Lock-screen push is working.", "test-" + Date.now());
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, devices: subs.length }));
     return;
