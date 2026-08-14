@@ -188,10 +188,25 @@ function computeTriggers(sym, arr, st, nowMs) {
        observation and (b) the latest bar is current (< 2 min old). */
   const out = [];
   if (!arr || arr.length === 0) return out;
+  /* if we stopped observing this symbol for a while (left the watchlist,
+     server slept), silently re-baseline — never fire on state that changed
+     while nobody was watching */
+  if (st.init && st.lastSeen && nowMs - st.lastSeen > 180000) st.init = false;
+  st.lastSeen = nowMs;
   const last = arr[arr.length - 1];
   const fresh = nowMs - last.t < 120000;
-  const heavy = arr.some((b) => b.v >= 30000);
-  const halted = heavy && nowMs - last.t > 150000;
+  /* HALT: only when the bars immediately before the silence were heavy AND
+     the tape was moving hard into it (LULD needs a violent move) — a thin
+     small-cap going quiet over lunch is not a halt */
+  const gapMs = nowMs - last.t;
+  let preHeavy = false, preMove = 0;
+  if (arr.length >= 6) {
+    const l3 = arr.slice(-3);
+    preHeavy = l3.every((b) => b.v >= 20000) && l3.reduce((a, b) => a + b.v, 0) / 3 >= 30000;
+    const back = arr[arr.length - 6];
+    preMove = Math.abs((last.c - back.o) / (back.o || 1)) * 100;
+  }
+  const halted = gapMs > 150000 && preHeavy && preMove >= 3;
   const canFire = !!st.init;
   if (canFire && halted && !st.halted)
     out.push({ key: `${sym}-halt-${Math.floor(nowMs / 36e5)}`, title: `⛔ ${sym} possible halt`, body: "Heavy tape went silent — no prints for 2+ min (LULD?)" });
@@ -226,14 +241,20 @@ function computeTriggers(sym, arr, st, nowMs) {
       out.push({ key: `${sym}-emax`, title: `🚨 ${sym} 8/21 EMA bull cross`, body: `EMA 8 crossed above EMA 21 · $${fp(p)}` });
     if (!st.pmhBroken && pmhNow)
       out.push({ key: `${sym}-pmh`, title: `🚨 ${sym} broke premarket high`, body: `Through PMH $${fp(pmH)} · now $${fp(p)}` });
-    if (!st.openvolDone && opens.length && last.v >= Math.max(...opens)) {
+    if (!st.openvolDone && opens.length && last.v >= Math.max(...opens) && last.v >= 50000) {
       st.openvolDone = true;
       out.push({ key: `${sym}-openvol`, title: `🔥 ${sym} volume ≥ opening drive`, body: `${fv(last.v)}/min matches the 9:30 open candles` });
     }
+    /* VOLUME SPIKE — must be a significant, price-confirmed event:
+       ≥3× the 10-min average AND the biggest bar of the last 30 min
+       AND ≥100k shares AND ≥1% thrust on the bar. 20-min cooldown. */
     const prior = arr.slice(-11, -1);
     const avg10 = prior.length ? prior.reduce((a, b) => a + b.v, 0) / prior.length : 0;
-    if (avg10 && last.v >= 2 * avg10)
-      out.push({ key: `${sym}-vol2x-${Math.floor(nowMs / 36e5)}`, title: `🔥 ${sym} volume surge`, body: `${fv(last.v)}/min = ${(last.v / avg10).toFixed(1)}× the 10-min average` });
+    const prior30 = arr.slice(-31, -1);
+    const max30 = prior30.length ? Math.max(...prior30.map((b) => b.v)) : 0;
+    const barMove = Math.abs((last.c - last.o) / (last.o || 1)) * 100;
+    if (avg10 && last.v >= 3 * avg10 && last.v >= max30 && last.v >= 100000 && barMove >= 1)
+      out.push({ key: `${sym}-volsurge-${Math.floor(nowMs / 12e5)}`, title: `🔥 ${sym} volume spike ${(last.v / avg10).toFixed(1)}×`, body: `${fv(last.v)}/min — biggest bar in 30 min, ${last.c >= last.o ? "↑" : "↓"}${barMove.toFixed(1)}% thrust @ $${fp(last.c)}` });
   }
   st.vwapSide = above; st.emaSide = emAbove; st.pmhBroken = pmhNow;
   return out;
