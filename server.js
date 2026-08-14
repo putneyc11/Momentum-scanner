@@ -127,8 +127,13 @@ function sendPush(sub, payloadObj) {
 
 /* ============================ subscriptions ============================ */
 let subs = [];   // [{ sub, keys:{id,secret}, feed }]
-try { subs = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8")); } catch (e) {}
-function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify(subs)); } catch (e) {} }
+let watch = [];  // the app's current ranked list — the ONLY symbols monitored
+try {
+  const saved = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
+  if (Array.isArray(saved)) subs = saved;
+  else { subs = saved.subs || []; watch = saved.watch || []; }
+} catch (e) {}
+function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch })); } catch (e) {} }
 async function broadcast(title, bodyTxt) {
   const dead = [];
   for (const s of subs) {
@@ -176,45 +181,61 @@ async function getFloat(sym) {
 /* ============================ trigger monitor ============================ */
 /* Pure function so it's unit-testable: takes 1-min session bars, returns triggers. */
 function computeTriggers(sym, arr, st, nowMs) {
+  /* Transition-only + live-only semantics:
+     - The FIRST observation of a symbol establishes a silent baseline.
+       Nothing that already happened earlier in the day is ever replayed.
+     - Signals only fire when (a) the state CHANGED versus the last
+       observation and (b) the latest bar is current (< 2 min old). */
   const out = [];
   if (!arr || arr.length === 0) return out;
   const last = arr[arr.length - 1];
+  const fresh = nowMs - last.t < 120000;
   const heavy = arr.some((b) => b.v >= 30000);
   const halted = heavy && nowMs - last.t > 150000;
-  if (halted && !st.halted) out.push({ key: `${sym}-halt-${Math.floor(nowMs / 36e5)}`, title: `⛔ ${sym} possible halt`, body: "Heavy tape went silent — no prints for 2+ min (LULD?)" });
-  if (!halted && st.halted) out.push({ key: `${sym}-resume-${Math.floor(nowMs / 36e5)}`, title: `▶ ${sym} trading again`, body: "Prints resumed after the pause" });
+  const canFire = !!st.init;
+  if (canFire && halted && !st.halted)
+    out.push({ key: `${sym}-halt-${Math.floor(nowMs / 36e5)}`, title: `⛔ ${sym} possible halt`, body: "Heavy tape went silent — no prints for 2+ min (LULD?)" });
+  if (canFire && !halted && st.halted)
+    out.push({ key: `${sym}-resume-${Math.floor(nowMs / 36e5)}`, title: `▶ ${sym} trading again`, body: "Prints resumed after the pause" });
   st.halted = halted;
-  if (arr.length < 8) return out;
+  if (arr.length < 8) { st.init = true; return out; }
   const closes = arr.map((b) => b.c);
   const p = last.c;
-  /* VWAP cross up */
   let pv = 0, vv = 0;
   for (const b of arr) { pv += ((b.h + b.l + b.c) / 3) * b.v; vv += b.v; }
   const vw = vv ? pv / vv : p;
   const above = p > vw;
-  if (st.vwapSide === false && above) out.push({ key: `${sym}-vwapx`, title: `🚨 ${sym} reclaimed VWAP`, body: `Crossed above $${fp(vw)} · now $${fp(p)}` });
-  st.vwapSide = above;
-  /* EMA 8/21 bull cross */
   const ema = (n) => { const k = 2 / (n + 1); let e = null; for (const c of closes) e = e === null ? c : c * k + e * (1 - k); return e; };
   const emAbove = ema(8) > ema(21);
-  if (st.emaSide === false && emAbove) out.push({ key: `${sym}-emax`, title: `🚨 ${sym} 8/21 EMA bull cross`, body: `EMA 8 crossed above EMA 21 · $${fp(p)}` });
-  st.emaSide = emAbove;
-  /* premarket-high break + opening-drive volume */
   let pmH = null; const opens = [];
   for (const b of arr) {
     const m = etMinutes(b.t);
     if (m < OPEN_ET_MIN) pmH = pmH == null ? b.h : Math.max(pmH, b.h);
     if (m === OPEN_ET_MIN || m === OPEN_ET_MIN + 1) opens.push(b.v);
   }
-  if (pmH != null && etMinutes(last.t) >= OPEN_ET_MIN && p > pmH)
-    out.push({ key: `${sym}-pmh`, title: `🚨 ${sym} broke premarket high`, body: `Through PMH $${fp(pmH)} · now $${fp(p)}` });
-  if (opens.length && last.v >= Math.max(...opens))
-    out.push({ key: `${sym}-openvol`, title: `🔥 ${sym} volume ≥ opening drive`, body: `${fv(last.v)}/min matches the 9:30 open candles` });
-  /* 2x volume surge (re-armed hourly) */
-  const prior = arr.slice(-11, -1);
-  const avg10 = prior.length ? prior.reduce((a, b) => a + b.v, 0) / prior.length : 0;
-  if (avg10 && last.v >= 2 * avg10)
-    out.push({ key: `${sym}-vol2x-${Math.floor(nowMs / 36e5)}`, title: `🔥 ${sym} volume surge`, body: `${fv(last.v)}/min = ${(last.v / avg10).toFixed(1)}× the 10-min average` });
+  const pmhNow = pmH != null && etMinutes(last.t) >= OPEN_ET_MIN && p > pmH;
+  if (!st.init) {
+    st.init = true;
+    st.vwapSide = above; st.emaSide = emAbove; st.pmhBroken = pmhNow;
+    return out; /* baseline pass: record states, fire nothing */
+  }
+  if (fresh) {
+    if (st.vwapSide === false && above)
+      out.push({ key: `${sym}-vwapx`, title: `🚨 ${sym} reclaimed VWAP`, body: `Crossed above $${fp(vw)} · now $${fp(p)}` });
+    if (st.emaSide === false && emAbove)
+      out.push({ key: `${sym}-emax`, title: `🚨 ${sym} 8/21 EMA bull cross`, body: `EMA 8 crossed above EMA 21 · $${fp(p)}` });
+    if (!st.pmhBroken && pmhNow)
+      out.push({ key: `${sym}-pmh`, title: `🚨 ${sym} broke premarket high`, body: `Through PMH $${fp(pmH)} · now $${fp(p)}` });
+    if (!st.openvolDone && opens.length && last.v >= Math.max(...opens)) {
+      st.openvolDone = true;
+      out.push({ key: `${sym}-openvol`, title: `🔥 ${sym} volume ≥ opening drive`, body: `${fv(last.v)}/min matches the 9:30 open candles` });
+    }
+    const prior = arr.slice(-11, -1);
+    const avg10 = prior.length ? prior.reduce((a, b) => a + b.v, 0) / prior.length : 0;
+    if (avg10 && last.v >= 2 * avg10)
+      out.push({ key: `${sym}-vol2x-${Math.floor(nowMs / 36e5)}`, title: `🔥 ${sym} volume surge`, body: `${fv(last.v)}/min = ${(last.v / avg10).toFixed(1)}× the 10-min average` });
+  }
+  st.vwapSide = above; st.emaSide = emAbove; st.pmhBroken = pmhNow;
   return out;
 }
 
@@ -227,8 +248,8 @@ async function monitorTick() {
   const day = etDay(Date.now());
   if (monState.day !== day) { monState.fired = new Set(); monState.sym = {}; monState.day = day; }
   try {
-    const mv = await fetchJSON(`${DATA}/v1beta1/screener/stocks/movers?top=40`, H);
-    const pool = (mv.gainers || []).map((g) => g.symbol).slice(0, 30);
+    /* monitor is scoped to the app's synced watchlist — nothing else */
+    const pool = watch.slice(0, 15);
     if (pool.length === 0) return;
     const off = new Date();
     const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -331,6 +352,34 @@ const server = http.createServer(async (req, res) => {
       subs.push({ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" });
       saveSubs();
       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, devices: subs.length }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
+  if (u === "/push/watchlist" && req.method === "POST") {
+    try {
+      const b = JSON.parse(await readBody(req));
+      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 15);
+      saveSubs();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, watching: watch.length }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
+  if (u === "/push/unregister" && req.method === "POST") {
+    try {
+      const b = JSON.parse(await readBody(req));
+      if (b.endpoint) subs = subs.filter((s) => s.sub.endpoint !== b.endpoint);
+      else subs = []; /* single-user app: bell off = full silence */
+      saveSubs();
+      console.log("push unregistered —", subs.length, "device(s) remain");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, devices: subs.length }));
     } catch (e) {
