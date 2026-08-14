@@ -298,7 +298,7 @@ async function monitorTick() {
   if (monState.day !== day) { monState.fired = new Set(); monState.sym = {}; monState.day = day; }
   try {
     /* monitor is scoped to the app's synced watchlist — nothing else */
-    const pool = watch.slice(0, 15);
+    const pool = watch.slice(0, 20);
     if (pool.length === 0) return;
     const off = new Date();
     const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -462,7 +462,7 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/watchlist" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
-      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 15);
+      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 20);
       saveSubs();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));
