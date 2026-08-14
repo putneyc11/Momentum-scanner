@@ -229,9 +229,26 @@ function computeTriggers(sym, arr, st, nowMs) {
     if (m === OPEN_ET_MIN || m === OPEN_ET_MIN + 1) opens.push(b.v);
   }
   const pmhNow = pmH != null && etMinutes(last.t) >= OPEN_ET_MIN && p > pmH;
+  /* ---- ONE unified volume signal ----
+     Spike: ≥3× 10-min avg, biggest bar in 30 min, ≥100k shares, ≥1% thrust.
+     Opening-drive comparison only counts against a REAL opening drive
+     (9:30/9:31 candles themselves ≥100k) — matching a quiet open means nothing.
+     Dedup: each bar can fire at most once EVER (keyed by bar timestamp),
+     one volume alert per symbol per 30 min, and the baseline pass consumes
+     any bar that already qualifies. */
+  const prior = arr.slice(-11, -1);
+  const avg10 = prior.length ? prior.reduce((a, b) => a + b.v, 0) / prior.length : 0;
+  const prior30 = arr.slice(-31, -1);
+  const max30 = prior30.length ? Math.max(...prior30.map((b) => b.v)) : 0;
+  const barMove = Math.abs((last.c - last.o) / (last.o || 1)) * 100;
+  const openMax = opens.length ? Math.max(...opens) : 0;
+  const surgeQ = !!(avg10 && last.v >= 3 * avg10 && last.v >= max30 && last.v >= 100000 && barMove >= 1);
+  const openQ = openMax >= 100000 && last.v >= openMax;
+  const volQ = surgeQ || openQ;
   if (!st.init) {
     st.init = true;
     st.vwapSide = above; st.emaSide = emAbove; st.pmhBroken = pmhNow;
+    if (volQ) st.volBarT = last.t; /* consume: this already happened */
     return out; /* baseline pass: record states, fire nothing */
   }
   if (fresh) {
@@ -241,26 +258,37 @@ function computeTriggers(sym, arr, st, nowMs) {
       out.push({ key: `${sym}-emax`, title: `🚨 ${sym} 8/21 EMA bull cross`, body: `EMA 8 crossed above EMA 21 · $${fp(p)}` });
     if (!st.pmhBroken && pmhNow)
       out.push({ key: `${sym}-pmh`, title: `🚨 ${sym} broke premarket high`, body: `Through PMH $${fp(pmH)} · now $${fp(p)}` });
-    if (!st.openvolDone && opens.length && last.v >= Math.max(...opens) && last.v >= 50000) {
-      st.openvolDone = true;
-      out.push({ key: `${sym}-openvol`, title: `🔥 ${sym} volume ≥ opening drive`, body: `${fv(last.v)}/min matches the 9:30 open candles` });
+    if (volQ && last.t !== st.volBarT && (!st.lastVolAlert || nowMs - st.lastVolAlert > 30 * 60000)) {
+      st.lastVolAlert = nowMs;
+      const mult = avg10 ? (last.v / avg10).toFixed(1) : "?";
+      out.push({
+        key: `${sym}-vol-${last.t}`,
+        title: `🔥 ${sym} volume spike ${mult}×`,
+        body: `${fv(last.v)}/min ${last.c >= last.o ? "↑" : "↓"}${barMove.toFixed(1)}%${openQ ? " · ≥ opening drive" : ""} @ $${fp(last.c)}`,
+      });
     }
-    /* VOLUME SPIKE — must be a significant, price-confirmed event:
-       ≥3× the 10-min average AND the biggest bar of the last 30 min
-       AND ≥100k shares AND ≥1% thrust on the bar. 20-min cooldown. */
-    const prior = arr.slice(-11, -1);
-    const avg10 = prior.length ? prior.reduce((a, b) => a + b.v, 0) / prior.length : 0;
-    const prior30 = arr.slice(-31, -1);
-    const max30 = prior30.length ? Math.max(...prior30.map((b) => b.v)) : 0;
-    const barMove = Math.abs((last.c - last.o) / (last.o || 1)) * 100;
-    if (avg10 && last.v >= 3 * avg10 && last.v >= max30 && last.v >= 100000 && barMove >= 1)
-      out.push({ key: `${sym}-volsurge-${Math.floor(nowMs / 12e5)}`, title: `🔥 ${sym} volume spike ${(last.v / avg10).toFixed(1)}×`, body: `${fv(last.v)}/min — biggest bar in 30 min, ${last.c >= last.o ? "↑" : "↓"}${barMove.toFixed(1)}% thrust @ $${fp(last.c)}` });
   }
+  if (volQ) st.volBarT = last.t; /* a seen qualifying bar never fires again */
   st.vwapSide = above; st.emaSide = emAbove; st.pmhBroken = pmhNow;
   return out;
 }
 
+const MONSTATE_FILE = "/tmp/scanner-monstate.json";
 const monState = { fired: new Set(), sym: {}, day: null };
+try {
+  const ms = JSON.parse(fs.readFileSync(MONSTATE_FILE, "utf8"));
+  monState.day = ms.day || null;
+  monState.fired = new Set(ms.fired || []);
+  monState.sym = ms.sym || {};
+  console.log("monitor state restored:", monState.fired.size, "fired keys");
+} catch (e) {}
+function saveMonState() {
+  try {
+    fs.writeFileSync(MONSTATE_FILE, JSON.stringify({
+      day: monState.day, fired: [...monState.fired].slice(-800), sym: monState.sym,
+    }));
+  } catch (e) {}
+}
 async function monitorTick() {
   if (subs.length === 0) return;
   const cfg = subs[subs.length - 1]; // latest registration carries the API keys
@@ -296,6 +324,7 @@ async function monitorTick() {
       }
     }
   } catch (e) { console.log("monitor error:", String(e).slice(0, 120)); }
+  saveMonState();
 }
 setInterval(monitorTick, 45000);
 
@@ -369,8 +398,9 @@ const server = http.createServer(async (req, res) => {
     try {
       const b = JSON.parse(await readBody(req));
       if (!b.subscription || !b.subscription.endpoint) throw new Error("bad subscription");
-      subs = subs.filter((s) => s.sub.endpoint !== b.subscription.endpoint);
-      subs.push({ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" });
+      /* single-user app: a new registration replaces ALL prior subscriptions.
+         (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
+      subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
       saveSubs();
       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
       res.writeHead(200, { "Content-Type": "application/json" });
