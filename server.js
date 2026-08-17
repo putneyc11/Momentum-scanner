@@ -134,10 +134,12 @@ try {
   else { subs = saved.subs || []; watch = saved.watch || []; }
 } catch (e) {}
 function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch })); } catch (e) {} }
+let lastPushErr = null;
 async function broadcast(title, bodyTxt, key) {
   const dead = [];
   for (const s of subs) {
     const code = await sendPush(s.sub, { title, body: bodyTxt, key: key || "" });
+    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) dead.push(s.sub.endpoint);
   }
   if (dead.length) { subs = subs.filter((s) => !dead.includes(s.sub.endpoint)); saveSubs(); }
@@ -226,7 +228,7 @@ function computeTriggers(sym, arr, st, nowMs) {
   for (const b of arr) {
     const m = etMinutes(b.t);
     if (m < OPEN_ET_MIN) pmH = pmH == null ? b.h : Math.max(pmH, b.h);
-    if (m === OPEN_ET_MIN || m === OPEN_ET_MIN + 1) opens.push(b.v);
+    if (m >= OPEN_ET_MIN && m < OPEN_ET_MIN + 10) opens.push(b.v); /* first ten 9:30 candles */
   }
   const pmhNow = pmH != null && etMinutes(last.t) >= OPEN_ET_MIN && p > pmH;
   /* ---- ONE unified volume signal ----
@@ -258,6 +260,14 @@ function computeTriggers(sym, arr, st, nowMs) {
       out.push({ key: `${sym}-emax`, title: `🚨 ${sym} 8/21 EMA bull cross`, body: `EMA 8 crossed above EMA 21 · $${fp(p)}` });
     if (!st.pmhBroken && pmhNow)
       out.push({ key: `${sym}-pmh`, title: `🚨 ${sym} broke premarket high`, body: `Through PMH $${fp(pmH)} · now $${fp(p)}` });
+    const last3 = arr.slice(-3);
+    const before3 = arr.length >= 4 ? arr[arr.length - 4] : null;
+    const streak3 = last3.length === 3 && last3.every((b) => b.c > b.o) && (!before3 || before3.c <= before3.o);
+    if (streak3 && (!st.lastMom3 || nowMs - st.lastMom3 > 15 * 60000)) {
+      st.lastMom3 = nowMs;
+      const runPct = ((last.c - last3[0].o) / last3[0].o) * 100;
+      out.push({ key: `${sym}-mom3-${last.t}`, title: `📈 ${sym} 3 green candles in a row`, body: `$${fp(last3[0].o)} → $${fp(last.c)} (+${runPct.toFixed(1)}%) on 1-min` });
+    }
     if (volQ && last.t !== st.volBarT && (!st.lastVolAlert || nowMs - st.lastVolAlert > 30 * 60000)) {
       st.lastVolAlert = nowMs;
       const mult = avg10 ? (last.v / avg10).toFixed(1) : "?";
@@ -298,7 +308,7 @@ async function monitorTick() {
   if (monState.day !== day) { monState.fired = new Set(); monState.sym = {}; monState.day = day; }
   try {
     /* monitor is scoped to the app's synced watchlist — nothing else */
-    const pool = watch.slice(0, 20);
+    const pool = watch.slice(0, 40);
     if (pool.length === 0) return;
     const off = new Date();
     const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -437,6 +447,11 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
+  if (u === "/push/status") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ devices: subs.length, watch: watch.length, lastError: lastPushErr }));
+    return;
+  }
   if (u === "/push/pubkey") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ key: b64u(vapid.pubRaw) }));
@@ -462,7 +477,7 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/watchlist" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
-      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 20);
+      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 40);
       saveSubs();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));
