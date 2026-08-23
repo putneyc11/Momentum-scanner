@@ -414,7 +414,7 @@ select:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 .tapeitem .del:focus-visible,.tapeitem .del:hover{color:var(--red);outline:none}
 .tapeitem.now{border-color:var(--yellow-deep)}
 .tapeitem.now .t-meta .nowtag{color:var(--yellow)}
-.box-empty{padding:30px 10px;text-align:center;font-size:9px;letter-spacing:.2em;color:#8A836D;line-height:2.2}
+.box-empty{padding:30px 10px;text-align:center;font-size:9px;letter-spacing:.2em;color:#B9B29C;line-height:2.2}
 
 /* new tape form */
 #newsheet .body{display:flex;flex-direction:column;gap:12px}
@@ -432,6 +432,7 @@ select:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
   background-image:repeating-linear-gradient(180deg,transparent 0 26px,rgba(90,80,50,.18) 26px 27px);
 }
 #f-title:focus-visible,#f-text:focus-visible{outline:2px solid var(--yellow);outline-offset:2px}
+#f-title::placeholder,#f-text::placeholder{color:#8B8163;opacity:1}
 #newsheet .btnrow{display:flex;gap:8px}
 .key.paper-key{
   background:linear-gradient(180deg,var(--yellow-hi),var(--yellow) 55%,var(--yellow-lo));
@@ -762,12 +763,13 @@ setTapeFill(0);
 /* ---------- player ---------- */
 const synth=window.speechSynthesis;
 const player={
-  doc:null, seg:null, cur:0, playing:false, stopping:false,
+  doc:null, seg:null, cur:0, playing:false, stopping:false, gen:0,
   lastWordStart:0,           // char offset within current sentence for resume
   boundarySeen:false, sentencesWithoutBoundary:0, wordMode:true,
   utter:null, wakeLock:null,
 
   loadDoc(doc,{autoplay=false}={}){
+    this.gen++;
     this.stop();
     this.doc=doc; this.seg=segment(doc.text);
     this.cur=Math.min(doc.pos||0,Math.max(0,this.seg.sentences.length-1));
@@ -783,17 +785,19 @@ const player={
     this.playing=true; this.stopping=false;
     uiPlaying(true);
     // small delay: some engines drop a speak() issued right after cancel()
-    const from=this.lastWordStart;
-    setTimeout(()=>{ if(this.playing) this.speakCurrent(from); },60);
+    const from=this.lastWordStart, g=++this.gen;
+    setTimeout(()=>{ if(this.playing&&this.gen===g) this.speakCurrent(from); },60);
     this.acquireWake();
   },
   pause(){
+    this.gen++;
     this.playing=false; this.stopping=true;
     try{ synth.cancel(); }catch(e){}
     uiPlaying(false); this.releaseWake(); this.persistPos();
   },
   toggle(){ this.playing?this.pause():this.play(); },
   stop(){
+    this.gen++;
     this.playing=false; this.stopping=true;
     try{ synth.cancel(); }catch(e){}
     uiPlaying(false); this.releaseWake();
@@ -804,19 +808,22 @@ const player={
     this.lastWordStart=wordStart;
     highlightSentence(); updateHUD(); this.persistPos();
     if(this.playing){ this.stopping=true; try{synth.cancel();}catch(e){}
-      setTimeout(()=>{ if(this.playing) this.speakCurrent(this.lastWordStart); },80);
+      const g=++this.gen;
+      setTimeout(()=>{ if(this.playing&&this.gen===g) this.speakCurrent(this.lastWordStart); },80);
     }
   },
   rew(){ this.seek(this.lastWordStart>0&&!this.playing?this.cur:this.cur-1); },
   ff(){ this.seek(this.cur+1); },
   restartSentence(){ // after voice/rate/pitch change
     if(this.playing){ this.stopping=true; try{synth.cancel();}catch(e){}
-      setTimeout(()=>{ if(this.playing) this.speakCurrent(this.lastWordStart); },80); }
+      const g=++this.gen;
+      setTimeout(()=>{ if(this.playing&&this.gen===g) this.speakCurrent(this.lastWordStart); },80); }
   },
   speakCurrent(fromChar=0){
     const s=this.seg.sentences[this.cur];
     if(!s){ this.finish(); return; }
     this.stopping=false;
+    const g=this.gen;
     const text=fromChar>0?s.text.slice(fromChar):s.text;
     const u=new SpeechSynthesisUtterance(text);
     u.rate=SPEEDS[settings.speedIdx]; u.pitch=settings.pitch;
@@ -824,6 +831,7 @@ const player={
     const offset=fromChar;
     let sawBoundary=false;
     u.onboundary=e=>{
+      if(this.gen!==g) return;
       if(e.name&&e.name!=='word') return;
       sawBoundary=true; this.boundarySeen=true;
       const abs=offset+e.charIndex;
@@ -831,7 +839,7 @@ const player={
       if(wi>=0){ this.lastWordStart=s.words[wi].start; if(this.wordMode) highlightWord(wi); }
     };
     u.onend=()=>{
-      if(this.stopping) return;
+      if(this.gen!==g||this.stopping) return;
       if(!sawBoundary){
         this.sentencesWithoutBoundary++;
         if(this.sentencesWithoutBoundary>=2&&!this.boundarySeen&&this.wordMode){
@@ -846,7 +854,7 @@ const player={
       this.speakCurrent(0);
     };
     u.onerror=e=>{
-      if(this.stopping||e.error==='interrupted'||e.error==='canceled') return;
+      if(this.gen!==g||this.stopping||e.error==='interrupted'||e.error==='canceled') return;
       this.playing=false; uiPlaying(false); this.releaseWake();
       toast('SPEECH STOPPED — '+String(e.error||'unknown').toUpperCase());
     };
@@ -1016,7 +1024,10 @@ cassetteEl.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.p
 
 const speedEl=$('#speed');
 speedEl.value=settings.speedIdx;
-function applySpeedUI(){ speedRO.textContent=SPEEDS[settings.speedIdx]+'×'; }
+function applySpeedUI(){
+  speedRO.textContent=SPEEDS[settings.speedIdx]+'×';
+  speedEl.setAttribute('aria-valuetext',SPEEDS[settings.speedIdx]+'x speed');
+}
 applySpeedUI();
 speedEl.addEventListener('input',()=>{
   settings.speedIdx=+speedEl.value; store.save(LS_SET,settings);
@@ -1178,9 +1189,9 @@ $('#f-file').addEventListener('change',e=>{
 /* ---------- share target / URL params ---------- */
 (function handleShare(){
   const q=new URLSearchParams(location.search);
-  const shared=[q.get('title'),q.get('text'),q.get('url')].filter(Boolean).join('\n\n');
-  if(shared){
-    $('#f-text').value=q.get('text')||q.get('url')||'';
+  const shared=[q.get('text'),q.get('url')].filter(Boolean).join('\n\n');
+  if(shared||q.get('title')){
+    $('#f-text').value=shared;
     $('#f-title').value=q.get('title')||'';
     history.replaceState(null,'',location.pathname);
     setTimeout(()=>openSheet(newsheet),300);
