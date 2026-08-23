@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "project": "Aloud",
+  "scope": "aloud/",
+  "northStar": "A sport-walkman tape machine: text becomes a labelled cassette, playback is mechanical keys, the voice's position is yellow word-light behind smoke glass.",
+  "extensions": {
+    "shadows": {
+      "key-raised": "0 4px 8px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.22), inset 0 -2px 3px rgba(0,0,0,.4)",
+      "key-pressed": "0 1px 3px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.15), inset 0 -1px 2px rgba(0,0,0,.4)",
+      "window-recessed": "inset 0 2px 10px rgba(0,0,0,.75), inset 0 -1px 0 rgba(255,255,255,.06), 0 1px 0 rgba(255,255,255,.35)",
+      "device-on-table": "0 18px 60px rgba(0,0,0,.55)",
+      "lamp-lit": "0 0 8px rgba(226,59,34,.9), inset 0 1px 1px rgba(255,255,255,.4)"
+    },
+    "motion": {
+      "key-press": "transform .07s ease",
+      "cassette-clunk": "transform .12s cubic-bezier(.2,.8,.3,1)",
+      "door": "grid-template-rows .3s cubic-bezier(.2,.9,.25,1)",
+      "sheet": "transform .3s cubic-bezier(.2,.9,.25,1)",
+      "reels": "rAF loop, velocity lerp toward 0.9 rev/s, gated by prefers-reduced-motion"
+    },
+    "focus": "2px solid #161409 on yellow surfaces; 2px solid #FFC907 on dark surfaces; outline-offset 2-3px",
+    "breakpoints": {
+      "device-max-width": "460px",
+      "desktop-presentation": ">=500px centers the device on #232019 with 26px radius",
+      "short-viewport": "<=640px height compresses cassette and keys, reading 17px"
+    },
+    "assets": "Michroma and Caveat latin woff2 subsets embedded as base64 data URIs in index.html; icons are inline SVG drawn in tape-deck grammar"
+  }
+}
