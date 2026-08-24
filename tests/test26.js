@@ -49,6 +49,23 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   }
   await page.waitForTimeout(600);
 
+  // sparkline layout: the spark must sit fully INSIDE the row with a real
+  // right-side gap (a rigid 72px spark used to overflow phone rows and get
+  // clipped flush against the edge)
+  const sp = await page.evaluate(() => {
+    const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
+    if (!sym) return null;
+    let row = sym.parentElement;
+    while (row && !(row.getAttribute('style') || '').includes('cursor: pointer')) row = row.parentElement;
+    const canvas = row && row.querySelector('canvas');
+    if (!row || !canvas) return { missing: true };
+    const r = row.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+    return { gap: r.right - c.right, width: c.width };
+  });
+  console.log(sp && !sp.missing && sp.gap >= 16 && sp.width >= 24
+    ? `✓ spark inside the row with a right gap (${Math.round(sp.gap)}px gap, ${Math.round(sp.width)}px spark)`
+    : '✗ spark crammed against the row edge: ' + JSON.stringify(sp));
+
   // tap → the Advanced detail view opens DIRECTLY (the preview card is gone)
   const b0 = await page.textContent('#root');
   console.log(!b0.includes('Advanced view') ? '✓ no preview card markup on the list' : '✗ preview card still rendered');
