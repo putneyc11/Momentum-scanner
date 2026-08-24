@@ -3,5 +3,10 @@
   "version": "2.0.0",
   "private": true,
   "engines": { "node": ">=18" },
-  "scripts": { "start": "node server.js" }
+  "scripts": { "start": "node server.js" },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  }
 }
