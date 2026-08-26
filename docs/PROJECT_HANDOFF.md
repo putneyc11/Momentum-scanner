@@ -147,7 +147,17 @@ framework, canvas charts, mono/dark terminal aesthetic):
 
 All alerts: WATCH-SET symbols only; silent baseline on first sight (never
 replay the past); re-baseline after a 3-min observation gap; fresh-bar-only
-(<120s); transition-only where applicable. Types:
+(<120s); transition-only where applicable.
+
+PER-SYMBOL MUTES: every watchlist row (main + AH) carries a small bell that
+toggles alerts for just that stock. A muted symbol is (a) skipped by the
+client trigger/halt scan (`mutedRef`) and (b) filtered OUT of the
+`/push/watchlist` sync, so the server monitor never watches it — no server
+change was needed. Toggling re-syncs the watchlist immediately
+(`syncWatch`, fed by `watchPoolRef`). Mutes persist in storage
+(`muted-syms`, a build.py REPS pair) but are DAY-SCOPED: restore only
+applies to the same ET day, and the sweep's day-rollover wipes them — every
+new session starts with alerts on for everything. Types:
 
 - VWAP reclaim (below→above cross)
 - EMA 8/21 bull cross (1-min)

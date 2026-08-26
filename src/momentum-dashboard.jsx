@@ -508,7 +508,7 @@ function Spark({ bars, up, h, fill }) {
 }
 
 /* ---------------- watchlist row ---------------- */
-function GainerRow({ g, bars, halted, onOpen, fill, ah }) {
+function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
   /* Phone metrics (fill): slightly slimmer columns + tighter gaps so the row
      NEVER overflows — overflow is what used to jam the spark flush against
      the row edge with zero padding. The chevron is desktop-only (on phones
@@ -542,6 +542,23 @@ function GainerRow({ g, bars, halted, onOpen, fill, ah }) {
       <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>{fv(g.dayVol)}</span>
       <div style={{ flex: 1 }} />
       {bars && bars.length > 1 && <Spark bars={bars} up={g.pct >= 0} h={fill ? 32 : 24} fill={fill} />}
+      {onMute && !fill && (
+        <span
+          onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
+          title={muted ? "alerts muted for this stock — tap to unmute" : "alerts on for this stock — tap to mute"}
+          style={{ padding: "4px 2px", fontSize: 12, opacity: muted ? 0.4 : 0.9, cursor: "pointer", flexShrink: 0 }}>
+          {muted ? "\u{1F515}" : "\u{1F514}"}
+        </span>
+      )}
+      {onMute && fill && (
+        /* phone rows are width-critical: the bell lives in the free bottom-right
+           corner strip (below the spark), costing the flex row nothing */
+        <span
+          onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
+          style={{ position: "absolute", right: 2, bottom: 0, padding: "4px 10px 3px", fontSize: 11, lineHeight: "13px", opacity: muted ? 0.4 : 0.85, cursor: "pointer" }}>
+          {muted ? "\u{1F515}" : "\u{1F514}"}
+        </span>
+      )}
       {!fill && <span style={{ color: C.dim }}>›</span>}
     </div>
   );
@@ -1132,6 +1149,7 @@ export default function App() {
   const [haltedSyms, setHaltedSyms] = useState([]);
   const [ahMoves, setAhMoves] = useState([]);
   const [ahInfo, setAhInfo] = useState({}); /* ungated AH stats for main-row chips */
+  const [mutedSyms, setMutedSyms] = useState([]); /* mirrors mutedRef for the row bells */
   const universeRef = useRef(null);
   const uniSetRef = useRef(null);
   const candRef = useRef({});
@@ -1152,6 +1170,39 @@ export default function App() {
   const watchAllRef = useRef([]); /* EVERY qualifying ≥25% mover — alert coverage follows qualification, not rank */
   const ignScanRef = useRef(null);
   const dayRef = useRef(null); /* ET day of the last sweep — rollover wipes the slate for the 4 AM open */
+  const mutedRef = useRef(new Set()); /* per-symbol alert mutes (see toggleMute) */
+  const watchPoolRef = useRef([]); /* latest computed monitor pool, pre-mute-filter */
+
+  /* ---- per-symbol alert mutes: the small bell on every watchlist row.
+     A muted symbol is skipped by the in-app trigger scan AND filtered out of
+     the server push watchlist, so the phone stays quiet for exactly the
+     stocks you silence. Mutes are day-scoped — every new session starts
+     with alerts ON for everything. ---- */
+  const persistMuted = (set) => {
+    try { window.storage.set("muted-syms", JSON.stringify({ day: etDay(Date.now()), syms: [...set] })); } catch (e) {}
+  };
+  const restoreMuted = (mv) => {
+    if (mv && mv.day === etDay(Date.now()) && Array.isArray(mv.syms)) {
+      mutedRef.current = new Set(mv.syms);
+      setMutedSyms(mv.syms);
+    }
+  };
+  const syncWatch = useCallback(() => {
+    try {
+      fetch("/push/watchlist", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40) }),
+      }).catch(() => {});
+    } catch (e) {}
+  }, []);
+  const toggleMute = useCallback((sym) => {
+    const next = new Set(mutedRef.current);
+    if (next.has(sym)) next.delete(sym); else next.add(sym);
+    mutedRef.current = next;
+    setMutedSyms([...next]);
+    persistMuted(next);
+    syncWatch(); /* the push monitor follows the mute immediately */
+  }, [syncWatch]);
 
   /* load saved settings: device storage first, then the server copy —
      and if a saved setup exists, go STRAIGHT to the scanner (no re-entry) */
@@ -1180,6 +1231,10 @@ export default function App() {
         if (v.alertsOn) setAlertsOn(true);
         if (v.id && v.secret) setRunning(true);
       }
+      try {
+        const mr = await window.storage.get("muted-syms");
+        if (mr && mr.value) restoreMuted(JSON.parse(mr.value));
+      } catch {}
       try {
         if ("serviceWorker" in navigator) {
           const reg = await navigator.serviceWorker.getRegistration();
@@ -1321,6 +1376,7 @@ export default function App() {
         watchAllRef.current = []; gainersRef.current = [];
         firedRef.current = new Set(); trigRef.current = {};
         ahStickyRef.current = new Set();
+        mutedRef.current = new Set(); setMutedSyms([]); persistMuted(mutedRef.current);
         setGainers([]); setBarsMap({}); setPmMap({}); setFound(0);
         setAhMoves([]); setAhInfo({});
       }
@@ -1518,7 +1574,7 @@ export default function App() {
         if (arr.length < 8) continue;
         /* ---- trigger alerts: WATCHLIST symbols only, transitions only,
                 and only when the signal bar is the live one ---- */
-        if (alertsOnRef.current && listSet.has(s) && arr.length >= 8) {
+        if (alertsOnRef.current && listSet.has(s) && !mutedRef.current.has(s) && arr.length >= 8) {
           const st = trigRef.current[s] || (trigRef.current[s] = {});
           /* re-baseline silently if this symbol wasn't observed recently
              (left the list / app slept) — never fire on off-list history */
@@ -1588,10 +1644,10 @@ export default function App() {
       if (alertsOnRef.current) {
         const hr2 = Math.floor(nowMs / 3600000);
         for (const s of newHalt)
-          if (!haltRef.current.has(s) && listSet.has(s))
+          if (!haltRef.current.has(s) && listSet.has(s) && !mutedRef.current.has(s))
             alertOnce(`${s}-halt-${hr2}`, `⛔ ${s} possible halt`, "Heavy tape went silent — no prints for 2+ min (LULD?)");
         for (const s of haltRef.current)
-          if (!newHalt.includes(s) && listSet.has(s))
+          if (!newHalt.includes(s) && listSet.has(s) && !mutedRef.current.has(s))
             alertOnce(`${s}-resume-${hr2}`, `▶ ${s} trading again`, "Prints resumed after the pause");
       }
       haltRef.current = new Set(newHalt);
@@ -1714,17 +1770,15 @@ export default function App() {
         fetch("/push/status").then((r) => r.json()).then((st2) => {
           setPushWarn(!!(st2 && st2.lastError && Date.now() - st2.lastError.t < 10 * 60000));
         }).catch(() => {});
-        fetch("/push/watchlist", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbols: [...new Set([...top.map((x) => x.symbol), ...watchAllRef.current, ...ahRef.current])].slice(0, 40) }),
-        }).catch(() => {});
+        watchPoolRef.current = [...new Set([...top.map((x) => x.symbol), ...watchAllRef.current, ...ahRef.current])];
+        syncWatch(); /* muted symbols never reach the push monitor */
       } catch (e) {}
     } catch (e) {
       setErr(String(e.message || e));
     } finally {
       busy.current = false;
     }
-  }, [keys, maxPrice, feed, minDayVol, getFloat]);
+  }, [keys, maxPrice, feed, minDayVol, getFloat, syncWatch]);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
   useEffect(() => {
     if (!running || paused) return;
@@ -1956,7 +2010,7 @@ export default function App() {
           </div>
         )}
         {gainers.map((g) => (
-          <GainerRow key={g.symbol} g={g} bars={barsMap[g.symbol]} halted={haltedSyms.includes(g.symbol)} onOpen={openAdvanced} fill={mobile} ah={ahInfo[g.symbol]} />
+          <GainerRow key={g.symbol} g={g} bars={barsMap[g.symbol]} halted={haltedSyms.includes(g.symbol)} onOpen={openAdvanced} fill={mobile} ah={ahInfo[g.symbol]} muted={mutedSyms.includes(g.symbol)} onMute={toggleMute} />
         ))}
       </div>
 
@@ -1976,7 +2030,7 @@ export default function App() {
             <span>Trend</span>
           </div>
           {ahMoves.map((r) => (
-            <GainerRow key={r.symbol} g={r} bars={r.bars} halted={haltedSyms.includes(r.symbol)} onOpen={openAdvanced} fill={mobile} />
+            <GainerRow key={r.symbol} g={r} bars={r.bars} halted={haltedSyms.includes(r.symbol)} onOpen={openAdvanced} fill={mobile} muted={mutedSyms.includes(r.symbol)} onMute={toggleMute} />
           ))}
         </div>
       )}
@@ -1988,7 +2042,7 @@ export default function App() {
         </div>
       )}
       <div style={{ padding: "0 14px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
-        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate: movers vs the regular close, the top 10 AH gainers (≥3% since the close, ≥{fv(AH_MIN_RATE)}/min avg, ≥1M shares on the full day) qualify once and stay while positive, graded by the same setup score. Tap any row to open the Advanced detail view. Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
+        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate: movers vs the regular close, the top 10 AH gainers (≥3% since the close, ≥{fv(AH_MIN_RATE)}/min avg, ≥1M shares on the full day) qualify once and stay while positive, graded by the same setup score. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
       </div>
 
       {sel && (

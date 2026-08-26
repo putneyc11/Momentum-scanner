@@ -15,7 +15,9 @@
                    tap-to-preview card was removed), back navigation. Clock pinned
                    to 13:00 ET so the RTH discovery path runs.
 - test28.js      — Playwright UI: alert coverage beyond the top-15, mom3 in-app,
-                   alert-center modal, swipe-to-clear. Clock pinned to 17:30 ET.
+                   alert-center modal, swipe-to-clear, and the per-symbol mute
+                   bell (mute drops the stock from the push-monitor sync,
+                   unmute restores it). Clock pinned to 17:30 ET.
 
 Playwright tests expect the server on :8787 (`node ../deploy/server.js &`) and
 playwright installed (npm dev dependency, or globally — the require falls back).

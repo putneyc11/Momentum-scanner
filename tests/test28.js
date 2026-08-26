@@ -96,6 +96,33 @@ function barsAH(sym, n){
   await page.waitForTimeout(500);
   const after = await page.textContent('#root');
   console.log(!after.includes('swipe ←: clear') ? '✓ swipe-left clears the banner (tap no longer clears)' : '✗ banner still present after swipe');
+
+  // ---- 5) per-symbol bell: mute GOODA → dropped from the push-monitor sync ----
+  const muteClicked = await page.evaluate(() => {
+    const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
+    const bell = sym && [...sym.closest('div').querySelectorAll('span')].find(s => s.textContent === '🔔');
+    if (!bell) return false;
+    bell.click();
+    return true;
+  });
+  if (!muteClicked) console.log('✗ no bell found on the GOODA row');
+  await page.waitForTimeout(800);
+  const rowTxt = await page.evaluate(() => {
+    const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
+    return sym ? sym.closest('div').textContent : '';
+  });
+  console.log(rowTxt.includes('🔕') ? '✓ row bell flips to muted (🔕)' : '✗ bell did not toggle: ' + JSON.stringify(rowTxt.slice(0, 80)));
+  console.log(!syncedSyms.includes('GOODA') ? '✓ muted stock removed from the push-monitor watchlist' : '✗ GOODA still synced while muted');
+  console.log(syncedSyms.includes('WKLO') ? '✓ other stocks stay on the monitor while one is muted' : '✗ mute clobbered the rest of the watchlist');
+
+  // ---- 6) unmute → the stock rejoins the monitor immediately ----
+  await page.evaluate(() => {
+    const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
+    const bell = sym && [...sym.closest('div').querySelectorAll('span')].find(s => s.textContent === '🔕');
+    if (bell) bell.click();
+  });
+  await page.waitForTimeout(800);
+  console.log(syncedSyms.includes('GOODA') ? '✓ unmute restores the stock to the push monitor' : '✗ GOODA not restored after unmute');
   console.log('JS errors:', errors.length ? errors : 'none');
   await browser.close();
   process.exit(errors.length ? 1 : 0);

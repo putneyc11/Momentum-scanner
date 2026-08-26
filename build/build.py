@@ -58,6 +58,16 @@ REPS = [
      'try { localStorage.setItem("uni-cache", JSON.stringify({ t: Date.now(), symbols: universeRef.current })); } catch (e) {}'),
     ('try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 3 })); } catch {}',
      'try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 3 })); } catch {}'),
+    ('try { window.storage.set("muted-syms", JSON.stringify({ day: etDay(Date.now()), syms: [...set] })); } catch (e) {}',
+     'try { localStorage.setItem("muted-syms", JSON.stringify({ day: etDay(Date.now()), syms: [...set] })); } catch (e) {}'),
+    ('''      try {
+        const mr = await window.storage.get("muted-syms");
+        if (mr && mr.value) restoreMuted(JSON.parse(mr.value));
+      } catch {}''',
+     '''      try {
+        const mraw = localStorage.getItem("muted-syms");
+        if (mraw) restoreMuted(JSON.parse(mraw));
+      } catch {}'''),
     ('export default function App()', 'function App()'),
 ]
 
