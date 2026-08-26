@@ -1512,7 +1512,27 @@ export default function App() {
             }
           } catch (e) {}
         }
-        ahCandRef.current = Object.values(ahc).sort((a, b) => b.pct - a.pct).slice(0, 15);
+        /* verify the leaders' REAL tape: 1-min bars from 16:00 give true
+           cumulative AH volume — illiquid one-print names are dropped, and
+           the verified volume rides into the table (never a dash) */
+        const leaders = Object.values(ahc).sort((a, b) => b.pct - a.pct).slice(0, 40);
+        const verified = [];
+        for (let off = 0; off < leaders.length; off += 15) {
+          const batch = leaders.slice(off, off + 15);
+          try {
+            const bj = await alpaca("/v2/stocks/bars", barParams(feed, {
+              symbols: batch.map((c) => c.symbol).join(","), timeframe: "1Min",
+              start: todayETStartISO(16), limit: 10000,
+            }), keys);
+            for (const c of batch) {
+              const arr = (bj.bars && bj.bars[c.symbol]) || [];
+              let v = 0;
+              for (const b of arr) if (etDay(b.t) === today && etMinutes(b.t) >= 960) v += b.v;
+              if (v >= AH_MIN_VOL) verified.push({ ...c, ahVol: v });
+            }
+          } catch (e) {}
+        }
+        ahCandRef.current = verified.sort((a, b) => b.pct - a.pct).slice(0, 15);
       } else ahCandRef.current = [];
       setFound(Object.keys(cands).length);
       setNote("");
@@ -1693,7 +1713,7 @@ export default function App() {
           const info = ahAll[c.symbol];
           const pct = info ? info.pct : c.pct;
           const sc = setupScore({ pct, dayVol: info ? info.sessVol : 0 }, allBars[c.symbol], getFloat(c.symbol));
-          ahTop.push({ symbol: c.symbol, price: info ? info.price : c.price, pct, dayVol: info ? info.vol : null, score: sc.score, grade: sc.grade, bars: info ? info.bars : null });
+          ahTop.push({ symbol: c.symbol, price: info ? info.price : c.price, pct, dayVol: info ? info.vol : c.ahVol, score: sc.score, grade: sc.grade, bars: info ? info.bars : null });
         }
         ahTop.sort((a, b) => b.pct - a.pct);
       }
@@ -2060,7 +2080,7 @@ export default function App() {
         <div style={{ margin: "12px 14px 0", background: C.panel, border: `1px solid ${C.ema21}66`, borderRadius: 10, overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${C.ema21}33` }}>
             <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, color: C.ema21, textTransform: "uppercase" }}>🌙 After hours</span>
-            <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>top 10 by AH % · whole market · vs 4:00 PM close · no filters</span>
+            <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>top 10 by AH % · whole market · real tape only, ≥{fv(AH_MIN_VOL)} AH shares</span>
           </div>
           <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 6 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
             <span style={{ minWidth: 40 }}>Rank</span>
@@ -2084,7 +2104,7 @@ export default function App() {
         </div>
       )}
       <div style={{ padding: "0 14px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
-        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are always shown — no percentage or volume requirements. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
+        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are shown — no percentage floor, but illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) are excluded and the VOL column is true cumulative AH volume. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
       </div>
 
       {sel && (
