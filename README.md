@@ -34,3 +34,25 @@ support/resistance targets, and a full-screen advanced chart with live ticks.
 - `server.js` — serves the app + proxies Alpaca REST calls past CORS
 - `index.html` — the entire dashboard (React, single file)
 - `package.json`, `render.yaml` — deploy config
+
+## Development
+
+`index.html` and `server.js` are BUILD OUTPUTS — don't edit them by hand.
+
+- `src/momentum-dashboard.jsx` — canonical client source (edit this)
+- `src/server.template.js` — server source (edit this)
+- `build/build.py` — bundles both into `deploy/` and copies them to the
+  repo root (what Render serves):
+  `npm i --no-save esbuild react react-dom playwright && python3 build/build.py`
+  (dev tools are installed with `--no-save` on purpose — `package.json` must
+  stay dependency-free and pinned to `"node": "22.x"`, or Render's yarn
+  step grabs a prerelease Node and fails the engine check)
+- `tests/` — server unit tests + Playwright UI tests (see `tests/README.md`)
+- `docs/PROJECT_HANDOFF.md` — full architecture + hard-won API facts; read
+  it before changing discovery, alerts, or the build
+
+The scanner is session-aware: premarket (4:00–9:30 AM ET) discovery runs on
+Alpaca snapshots vs the prior close (≥10% gap, ≥25k premarket shares) and the
+watchlist auto-populates fresh from the 4:00 AM open each day; regular hours
+use the full-day sweep (≥25% day, min day volume). Tapping a row opens the
+Advanced chart directly.
