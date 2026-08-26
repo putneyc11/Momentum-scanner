@@ -1,0 +1,12 @@
+{
+  "name": "momentum-algo-trader",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "test": "node test-engine.js",
+    "trade": "node engine.js trade",
+    "backtest": "node engine.js backtest",
+    "tune": "node engine.js tune"
+  }
+}
