@@ -100,25 +100,26 @@ function barsAH(sym, n){
   // ---- 5) per-symbol bell: mute GOODA → dropped from the push-monitor sync ----
   const muteClicked = await page.evaluate(() => {
     const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
-    const bell = sym && [...sym.closest('div').querySelectorAll('span')].find(s => s.textContent === '🔔');
+    const bell = sym && sym.closest('div').querySelector('span[aria-label="mute alerts for this stock"]');
     if (!bell) return false;
     bell.click();
     return true;
   });
   if (!muteClicked) console.log('✗ no bell found on the GOODA row');
   await page.waitForTimeout(800);
-  const rowTxt = await page.evaluate(() => {
+  const bellState = await page.evaluate(() => {
     const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
-    return sym ? sym.closest('div').textContent : '';
+    const bell = sym && sym.closest('div').querySelector('span[aria-label]');
+    return bell ? bell.getAttribute('aria-label') : '';
   });
-  console.log(rowTxt.includes('🔕') ? '✓ row bell flips to muted (🔕)' : '✗ bell did not toggle: ' + JSON.stringify(rowTxt.slice(0, 80)));
+  console.log(bellState === 'unmute alerts for this stock' ? '✓ row bell flips to muted (outline bell-off)' : '✗ bell did not toggle: ' + JSON.stringify(bellState));
   console.log(!syncedSyms.includes('GOODA') ? '✓ muted stock removed from the push-monitor watchlist' : '✗ GOODA still synced while muted');
   console.log(syncedSyms.includes('WKLO') ? '✓ other stocks stay on the monitor while one is muted' : '✗ mute clobbered the rest of the watchlist');
 
   // ---- 6) unmute → the stock rejoins the monitor immediately ----
   await page.evaluate(() => {
     const sym = [...document.querySelectorAll('span')].find(s => s.textContent === 'GOODA');
-    const bell = sym && [...sym.closest('div').querySelectorAll('span')].find(s => s.textContent === '🔕');
+    const bell = sym && sym.closest('div').querySelector('span[aria-label="unmute alerts for this stock"]');
     if (bell) bell.click();
   });
   await page.waitForTimeout(800);

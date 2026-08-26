@@ -502,9 +502,21 @@ function Spark({ bars, up, h, fill }) {
      and clipped its padding entirely. marginRight keeps a real gap between
      the end of the line and the row edge at every width. */
   return <canvas ref={ref} style={{
-    ...(fill ? { flex: "1 1 44px", minWidth: 24, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
-    height: h || 24, display: "block", marginRight: 10,
+    ...(fill ? { flex: "0 1 72px", minWidth: 16, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
+    height: h || 24, display: "block", marginRight: fill ? 0 : 10,
   }} />;
+}
+
+/* ---------------- outline bell (stroke-only, inherits the row's gray) ---------------- */
+function BellIcon({ muted }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: "block" }}>
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      {muted && <line x1="2" y1="2" x2="22" y2="22" />}
+    </svg>
+  );
 }
 
 /* ---------------- watchlist row ---------------- */
@@ -513,11 +525,11 @@ function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
      NEVER overflows — overflow is what used to jam the spark flush against
      the row edge with zero padding. The chevron is desktop-only (on phones
      it was always clipped anyway, and the whole row is tappable). */
-  const w = fill ? { tick: 50, price: 52, pct: 62, vol: 44 } : { tick: 54, price: 56, pct: 66, vol: 48 };
+  const w = fill ? { tick: 50, price: 52, pct: 62, vol: 42 } : { tick: 54, price: 56, pct: 66, vol: 48 };
   return (
     <div
       onClick={() => onOpen(g.symbol)}
-      style={{ display: "flex", alignItems: "center", gap: fill ? 7 : 10, padding: "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
+      style={{ display: "flex", alignItems: "center", gap: fill ? 6 : 10, padding: "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
     >
       <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: "2px 6px", minWidth: 40, textAlign: "center", flexShrink: 0 }}>
         {g.grade} {g.score}
@@ -535,28 +547,22 @@ function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
       {ah && fill && (
         /* AH readout: its own band anchored to the ROW bottom (out of flow),
            aligned under the % column — clear of the centered number line */
-        <span style={{ position: "absolute", bottom: 5, left: 189, fontSize: 9, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>
+        <span style={{ position: "absolute", bottom: 5, left: 186, fontSize: 9, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>
           {`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}
         </span>
       )}
       <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>{fv(g.dayVol)}</span>
       <div style={{ flex: 1 }} />
       {bars && bars.length > 1 && <Spark bars={bars} up={g.pct >= 0} h={fill ? 32 : 24} fill={fill} />}
-      {onMute && !fill && (
+      {onMute && (
+        /* outline bell, vertically centered, padded both sides; stretching to
+           the row height makes the whole strip a comfortable tap target */
         <span
           onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
+          aria-label={muted ? "unmute alerts for this stock" : "mute alerts for this stock"}
           title={muted ? "alerts muted for this stock — tap to unmute" : "alerts on for this stock — tap to mute"}
-          style={{ padding: "4px 2px", fontSize: 12, opacity: muted ? 0.4 : 0.9, cursor: "pointer", flexShrink: 0 }}>
-          {muted ? "\u{1F515}" : "\u{1F514}"}
-        </span>
-      )}
-      {onMute && fill && (
-        /* phone rows are width-critical: the bell lives in the free bottom-right
-           corner strip (below the spark), costing the flex row nothing */
-        <span
-          onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
-          style={{ position: "absolute", right: 2, bottom: 0, padding: "4px 10px 3px", fontSize: 11, lineHeight: "13px", opacity: muted ? 0.4 : 0.85, cursor: "pointer" }}>
-          {muted ? "\u{1F515}" : "\u{1F514}"}
+          style={{ display: "flex", alignItems: "center", alignSelf: "stretch", padding: "0 7px", color: muted ? C.dim : C.muted, opacity: muted ? 0.55 : 1, cursor: "pointer", flexShrink: 0 }}>
+          <BellIcon muted={muted} />
         </span>
       )}
       {!fill && <span style={{ color: C.dim }}>›</span>}
@@ -1991,12 +1997,12 @@ export default function App() {
 
       {/* ranked watchlist table — stretches to fill the phone screen */}
       <div style={{ margin: "12px 14px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
-        <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 7 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
+        <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 6 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
           <span style={{ minWidth: 40 }}>Rank</span>
           <span style={{ minWidth: mobile ? 50 : 54 }}>Ticker</span>
           <span style={{ minWidth: mobile ? 52 : 56 }}>Price</span>
           <span style={{ minWidth: mobile ? 62 : 66 }}>% Day</span>
-          <span style={{ minWidth: mobile ? 44 : 48 }}>Vol</span>
+          <span style={{ minWidth: mobile ? 42 : 48 }}>Vol</span>
           <div style={{ flex: 1 }} />
           <span>Trend</span>
         </div>
@@ -2020,12 +2026,12 @@ export default function App() {
             <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, color: C.ema21, textTransform: "uppercase" }}>🌙 After hours</span>
             <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>top 10 AH gainers · vs 4:00 PM close · ≥1M day shares · stays all session</span>
           </div>
-          <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 7 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
+          <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 6 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
             <span style={{ minWidth: 40 }}>Rank</span>
             <span style={{ minWidth: mobile ? 50 : 54 }}>Ticker</span>
             <span style={{ minWidth: mobile ? 52 : 56 }}>Price</span>
             <span style={{ minWidth: mobile ? 62 : 66 }}>% AH</span>
-            <span style={{ minWidth: mobile ? 44 : 48 }}>Vol</span>
+            <span style={{ minWidth: mobile ? 42 : 48 }}>Vol</span>
             <div style={{ flex: 1 }} />
             <span>Trend</span>
           </div>

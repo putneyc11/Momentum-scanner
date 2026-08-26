@@ -62,7 +62,7 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
     const r = row.getBoundingClientRect(), c = canvas.getBoundingClientRect();
     return { gap: r.right - c.right, width: c.width };
   });
-  console.log(sp && !sp.missing && sp.gap >= 16 && sp.width >= 24
+  console.log(sp && !sp.missing && sp.gap >= 16 && sp.width >= 14
     ? `✓ spark inside the row with a right gap (${Math.round(sp.gap)}px gap, ${Math.round(sp.width)}px spark)`
     : '✗ spark crammed against the row edge: ' + JSON.stringify(sp));
 
