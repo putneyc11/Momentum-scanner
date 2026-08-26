@@ -42,7 +42,11 @@ support/resistance targets, and a full-screen advanced chart with live ticks.
 - `src/momentum-dashboard.jsx` — canonical client source (edit this)
 - `src/server.template.js` — server source (edit this)
 - `build/build.py` — bundles both into `deploy/` and copies them to the
-  repo root (what Render serves): `npm i && python3 build/build.py`
+  repo root (what Render serves):
+  `npm i --no-save esbuild react react-dom playwright && python3 build/build.py`
+  (dev tools are installed with `--no-save` on purpose — `package.json` must
+  stay dependency-free and pinned to `"node": "22.x"`, or Render's yarn
+  step grabs a prerelease Node and fails the engine check)
 - `tests/` — server unit tests + Playwright UI tests (see `tests/README.md`)
 - `docs/PROJECT_HANDOFF.md` — full architecture + hard-won API facts; read
   it before changing discovery, alerts, or the build
