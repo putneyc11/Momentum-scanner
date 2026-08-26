@@ -49,7 +49,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 
 /* ---- backtest mechanics ---- */
 {
-  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780 };
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 100, flattenMin: 955 };
   const mk = (post) => {
     const bars = [];
     for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
@@ -93,6 +93,35 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(r4.trades.length === 2, `maxPositions caps concurrent exposure (took ${r4.trades.length}/5 signals)`);
 }
 
+/* ---- scale-out: 85% banked at the target, runner rides with break-even floor ---- */
+{
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 85, reentryLimit: 1, flattenMin: 955 };
+  const bars = [];
+  for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
+  for (let m = 570; m < 575; m++) bars.push(bar(m, 2, 2.1, 1.98, 2.05, 40000));
+  for (let m = 575; m < 605; m++) bars.push(bar(m, 2.05, 2.09, 2.0, 2.06, 30000));
+  bars.push(bar(605, 2.06, 2.2, 2.05, 2.18, 200000));
+  for (let m = 606; m < 640; m++) bars.push(bar(m, 2.2 + (m - 606) * 0.02, 2.23 + (m - 606) * 0.02, 2.19 + (m - 606) * 0.02, 2.22 + (m - 606) * 0.02, 60000));
+  for (let m = 640; m < 960; m++) bars.push(bar(m, 2.9, 2.91, 2.89, 2.9, 10000));
+  const r = runDay({ date: "SC", symbols: { SCL: bars } }, P, 100000);
+  ok(r.trades.length === 2, `scale-out splits the position into two bookings (got ${r.trades.length})`);
+  const sc = r.trades[0], run = r.trades[1];
+  ok(sc.reason === "scale" && Math.abs(sc.qty / (sc.qty + run.qty) - 0.85) < 0.02, `~85% banked at the planned exit (${sc.qty}/${sc.qty + run.qty})`);
+  ok(approx(sc.r, 2, 0.2), `scale-out banks ~targetR (${sc.r.toFixed(2)}R)`);
+  ok(run.pnl > 0 && run.exit >= run.entry, `runner keeps riding and exits above break-even (+$${run.pnl.toFixed(2)})`);
+}
+
+/* ---- premarket entries: a fresh premarket high IS the breakout ---- */
+{
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5 };
+  const bars = [];
+  for (let m = 240; m < 300; m++) bars.push(bar(m, 2, 2.05, 1.97, 2.0 + (m - 240) * 0.0005, 15000));
+  bars.push(bar(300, 2.03, 2.2, 2.02, 2.18, 120000)); // rips through the running PMH
+  const S = prepSeries(bars, P);
+  ok(signalAt(S, bars, bars.length - 2, P) === null, "no premarket entry while under the running PMH");
+  ok(!!signalAt(S, bars, bars.length - 1, P), "premarket PMH breakout with confluence fires an entry (4-9:30 ET)");
+}
+
 /* ---- tuner ---- */
 {
   const days = makeLibrary(40, 11);
@@ -131,14 +160,17 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
      { t: new Date(now - 5000).toISOString(), kind: "day", day: "x" }]
       .map((o) => JSON.stringify(o)).join("\n") + "\n");
   const listen = (srv) => new Promise((r) => srv.on("listening", () => r(srv.address().port)));
-  const srv = startDashboard({ port: 0, stateDir: dir, status: { session: "regular", positions: ["GAPPY"], universe: 5 } });
+  const srv = startDashboard({ port: 0, stateDir: dir, status: { session: "regular", universe: 5, positions: [
+    { sym: "GAPPY", qty: 100, entry: 4.5, price: 4.8, target: 5.2, stop: 4.2, scaleOutPct: 85, value: 480, plUsd: 30, plPct: 6.7 },
+  ] } });
   const port = await listen(srv);
   const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
   ok(html.includes("Account value") && html.includes("<canvas"), "dashboard serves the equity chart page");
+  ok(html.includes("Active trades") && html.includes("Planned exit") && html.includes("Stop loss"), "active-trades table ships with entry/planned-exit/stop columns");
   const st = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
   ok(st.equity.length === 3 && st.equity[2].eq === 100100, "equity samples stream through /api/state");
   ok(st.trades.length === 2 && st.trades[1].pnl === 75, "trade events (entry/exit only) reach the chart");
-  ok(st.status.universe === 5 && st.status.positions[0] === "GAPPY", "live status rides along");
+  ok(st.status.universe === 5 && st.status.positions[0].sym === "GAPPY" && st.status.positions[0].target === 5.2, "rich position rows (entry/target/stop/P&L) ride along");
   ok((await fetch(`http://127.0.0.1:${port}/health`)).status === 200, "health endpoint is open");
   srv.close();
   /* token guard */

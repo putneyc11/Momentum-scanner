@@ -1,6 +1,6 @@
 {
-  "entryStartMin": 570,
-  "entryEndMin": 690,
+  "entryStartMin": 240,
+  "entryEndMin": 1170,
   "minConfluence": 3,
   "volSurgeMult": 2.5,
   "rsiMax": 80,
@@ -14,7 +14,8 @@
   "trailAtrMult": 2,
   "timeStopMin": 45,
   "vwapExit": 1,
-  "flattenMin": 955,
+  "flattenMin": 1195,
+  "scaleOutPct": 85,
   "riskPct": 1,
   "maxNotionalPct": 25,
   "maxPositions": 3,
