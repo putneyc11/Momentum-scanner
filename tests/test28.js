@@ -9,6 +9,7 @@ const dayISO=(o)=>new Date(TARGET+(o||0)*864e5-90000).toISOString();
 // 18 qualifying movers (≥25%, ≥5M). WKLO scores WORST (fader shape) → ranked ~18th, off the display list
 function dailySet(sym){const out=[];for(let i=5;i>=1;i--)out.push({t:dayISO(-i),o:1,h:1.1,l:.9,c:1,v:4e5});
   if (sym==='QUIET'){out.push({t:dayISO(0),o:1,h:1.05,l:.98,c:1.02,v:1e5});return out;} // +2% day, thin — NOT a day mover
+  if (sym==='THINAH'){out.push({t:dayISO(0),o:1,h:1.02,l:.98,c:1.0,v:5e4});return out;} // flat day, illiquid AH pop
   const m = sym==='WKLO' ? 1.9 : 1.3 + 'ABCDEFGHIJKLMNOPQ'.indexOf(sym[1] || 'A') * 0.01;
   out.push({t:dayISO(0),o:1.05,h:m+.05,l:1,c:m,v:15e6});return out;}
 function bars5(sym){const a=[];for(let i=0;i<48;i++){
@@ -26,7 +27,7 @@ function barsAH(sym, n){
     let o = 2.00, c = 1.99;
     if (sym === 'QUIET') { o = m2 < 960 ? 1.00 : 1.40; c = o + 0.005; } // flat all day, +39% AH gap
     if (sym === 'GOODA' && scanN >= 2 && i >= n - 3) { o = 2.00 + (i - (n - 3)) * 0.03; c = o + 0.03; }
-    a.push({t:new Date(t).toISOString(),o,h:Math.max(o,c)+.01,l:Math.min(o,c)-.01,c,v:m2<960?30000:20000});
+    a.push({t:new Date(t).toISOString(),o,h:Math.max(o,c)+.01,l:Math.min(o,c)-.01,c,v:sym==='THINAH'?50:(m2<960?30000:20000)});
   }
   return a;
 }
@@ -41,7 +42,7 @@ function barsAH(sym, n){
     window.Date = F;
   }, [OFFSET]);
   await page.addInitScript(() => localStorage.setItem('alpaca-keys', JSON.stringify({ id:'K',secret:'S',feed:'sip',maxPrice:100,minDayVol:5000000,alertsOn:true,ver:3 })));
-  const SY = ['GOODA', ...Array.from({length:16},(_,i)=>'S'+String.fromCharCode(65+i)+'X'), 'WKLO', 'QUIET'];
+  const SY = ['GOODA', ...Array.from({length:16},(_,i)=>'S'+String.fromCharCode(65+i)+'X'), 'WKLO', 'QUIET', 'THINAH'];
   await page.route('**/trading/v2/assets?**', (r) => r.fulfill({ json: SY.map(s => ({ symbol: s, tradable: true, status: 'active', exchange: 'NASDAQ' })) }));
   await page.route('**/alpaca/v1beta1/**', (r) => r.fulfill({ json: { gainers: [], losers: [] } }));
   await page.route('**/alpaca/v2/stocks/snapshots**', (route) => {
@@ -49,8 +50,8 @@ function barsAH(sym, n){
     const syms = (u.searchParams.get('symbols') || '').split(',').filter(Boolean);
     const out = {};
     for (const s of syms) out[s] = {
-      latestTrade: { p: s==='QUIET' ? 1.41 : 2.0, s: 500, t: new Date(TARGET).toISOString() },
-      dailyBar: { t: dayISO(0), o: 1, h: 2, l: 1, c: s==='QUIET' ? 1.02 : 2.0, v: s==='QUIET' ? 1e5 : 15e6 },
+      latestTrade: { p: s==='QUIET' ? 1.41 : s==='THINAH' ? 1.25 : 2.0, s: 500, t: new Date(TARGET).toISOString() },
+      dailyBar: { t: dayISO(0), o: 1, h: 2, l: 1, c: s==='QUIET' ? 1.02 : s==='THINAH' ? 1.0 : 2.0, v: s==='QUIET' ? 1e5 : 15e6 },
       prevDailyBar: { t: dayISO(-1), o: 1, h: 1.1, l: .9, c: 1, v: 4e5 },
     };
     route.fulfill({ json: out });
@@ -124,7 +125,9 @@ function barsAH(sym, n){
     if (!card) return -2;
     return card.querySelectorAll('span[aria-label]').length; // one bell per row
   });
-  console.log(ahRowCount === 10 ? '✓ After Hours ALWAYS shows 10 rows — no % or volume gates' : '✗ AH row count: ' + ahRowCount);
+  console.log(ahRowCount === 10 ? '✓ After Hours shows a full 10 rows of liquid names' : '✗ AH row count: ' + ahRowCount);
+  console.log(!bodyAH.slice(ahIdx).includes('THINAH') ? '✓ illiquid AH pop (+25% on ~2k shares) is filtered OUT' : '✗ THINAH (illiquid) leaked into the AH table');
+  console.log(/QUIET1\.40\+39\.80%1\.\d\dM/.test(bodyAH.slice(ahIdx)) ? '✓ VOL column shows true cumulative AH volume (~1.8M), never a dash' : '✗ QUIET AH volume missing from the table');
 
   // ---- 5) per-symbol bell: mute GOODA → dropped from the push-monitor sync ----
   const muteClicked = await page.evaluate(() => {
