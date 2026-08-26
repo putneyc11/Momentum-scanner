@@ -1,0 +1,23 @@
+# One-click deploy of the paper-trading engine as an always-on Render
+# Background Worker. Create via render.com -> New -> Blueprint, pointed at
+# branch claude/algo-paper-trader. You are prompted for the two Alpaca
+# PAPER keys in the dashboard — they never touch the repo.
+services:
+  - type: worker
+    name: momentum-algo-trader
+    runtime: node
+    branch: claude/algo-paper-trader
+    buildCommand: ""
+    startCommand: node engine.js trade
+    autoDeploy: true
+    envVars:
+      - key: APCA_API_KEY_ID
+        sync: false
+      - key: APCA_API_SECRET_KEY
+        sync: false
+    disk:
+      # persists state/ (journal, recorded days, tuning history) across
+      # deploys and restarts — this is the engine's growing "memory"
+      name: algo-state
+      mountPath: /opt/render/project/src/state
+      sizeGB: 1
