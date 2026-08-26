@@ -93,9 +93,16 @@ framework, canvas charts, mono/dark terminal aesthetic):
   server), halt flags, and the After Hours table. Reads symbols through
   `gainersRef` — NOT the `gainers` state — because the 3s price tick changes
   state identity and once caused the scan to re-run every 3 seconds.
-- **After Hours (4:00–8:00 PM ET)**: top-10 AH gainers vs the 4:00 close.
-  Qualify once (≥3% AH gain, ≥5k/min avg over last 3 bars, ≥1M shares full
-  day) → sticky for the session, shown while gain is positive. Fully
+- **After Hours (4:00–8:00 PM ET)**: FULL-MARKET top-10 AH gainers vs the
+  4:00 close. Discovery is a snapshots sweep over the whole universe
+  (latestTrade after 16:00 today vs TODAY's official daily close,
+  `ahCandRef` top 25) so a stock that slept all day and gapped on 5 PM
+  news is caught — the old pool-only scan (day movers ∪ hot) missed those
+  entirely. The 1-min-bar scan (`ignScan`, pool widened to 60 in AH)
+  verifies tape and ranks BY AH GAIN. Qualify once (≥3% AH gain, ≥5k/min
+  avg over last 3 bars, ≥25k AH shares — the old ≥1M FULL-DAY volume gate
+  is gone on purpose: it specifically excluded quiet-day earnings gappers)
+  → sticky for the session, shown while gain is positive. Fully
   independent of main-list settings (a global rate filter once gutted the
   5 PM day list — never couple them again). Main rows show an ungated
   "AH +x% · vol" chip, absolutely positioned at the row bottom (in-flow
