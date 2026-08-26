@@ -56,7 +56,8 @@ function barsAH(sym, n){
     };
     route.fulfill({ json: out });
   });
-  await page.route('**/alpaca/v2/stocks/trades/latest**', (r) => r.fulfill({ json: { trades: {} } }));
+  let tickP = null; // when set, the batched 3s latest-trades tick prints QUIET at this price
+  await page.route('**/alpaca/v2/stocks/trades/latest**', (r) => r.fulfill({ json: { trades: tickP ? { QUIET: { p: tickP, s: 300, t: new Date(TARGET).toISOString() } } : {} } }));
   await page.route('**/alpaca/v2/stocks/bars**', (route) => {
     const u = new URL(route.request().url(), 'http://x');
     const tf = u.searchParams.get('timeframe');
@@ -128,6 +129,24 @@ function barsAH(sym, n){
   console.log(ahRowCount === 10 ? '✓ After Hours shows a full 10 rows of liquid names' : '✗ AH row count: ' + ahRowCount);
   console.log(!bodyAH.slice(ahIdx).includes('THINAH') ? '✓ illiquid AH pop (+25% on ~2k shares) is filtered OUT' : '✗ THINAH (illiquid) leaked into the AH table');
   console.log(/QUIET1\.40\+39\.80%1\.\d\dM/.test(bodyAH.slice(ahIdx)) ? '✓ VOL column shows true cumulative AH volume (~1.8M), never a dash' : '✗ QUIET AH volume missing from the table');
+
+  // ---- 4.6) every AH row draws a Trend sparkline (verified AH tape feeds it) ----
+  const ahSparks = await page.evaluate(() => {
+    const moon = [...document.querySelectorAll('span')].find(sp => (sp.textContent || '').trim() === '🌙 After hours');
+    let card = moon && moon.parentElement;
+    while (card && !/border-radius: 10px/.test(card.getAttribute('style') || '')) card = card.parentElement;
+    return card ? card.querySelectorAll('canvas').length : -1;
+  });
+  console.log(ahSparks === 10 ? '✓ every AH row draws a Trend sparkline (10/10 canvases)' : '✗ AH sparklines rendered: ' + ahSparks);
+
+  // ---- 4.7) AH rows re-price on the same 3s live tick as the main list ----
+  tickP = 1.55; // QUIET prints 1.55; 4:00 PM close 1.005 → +54.23% must appear within a tick or two
+  try {
+    await page.waitForFunction(() => document.getElementById('root').textContent.includes('+54.2'), { timeout: 12000 });
+    console.log('✓ AH row re-priced by the 3s latest-trades tick (1.55 vs the 4 PM close → +54.2%)');
+  } catch (e) {
+    console.log('✗ AH row never re-priced from the live 3s tick');
+  }
 
   // ---- 5) per-symbol bell: mute GOODA → dropped from the push-monitor sync ----
   const muteClicked = await page.evaluate(() => {
