@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Export all open Safari tabs to an AirDrop-friendly HTML + Markdown list,
-with an AI-generated one-line description of each page.
+"""Export all open Safari and Chrome tabs to an AirDrop-friendly HTML +
+Markdown list, with an AI-generated one-line description of each page.
 
 Runs on a stock Mac: standard library only (the Claude API is called over
 raw HTTPS with urllib, so no pip install is required).
@@ -11,10 +11,12 @@ Usage:
 
     python3 export_safari_tabs.py --no-ai          # skip Claude, use page metadata
     python3 export_safari_tabs.py --no-fetch       # don't download pages (titles only)
+    python3 export_safari_tabs.py --browsers safari         # Safari only
+    python3 export_safari_tabs.py --browsers chrome         # Chrome only
     python3 export_safari_tabs.py --output-dir ~/Downloads
     python3 export_safari_tabs.py --model claude-opus-5
 
-The first run will ask for permission to control Safari
+The first run will ask for permission to control each browser
 (System Settings > Privacy & Security > Automation).
 """
 
@@ -45,52 +47,87 @@ TABS_PER_API_CALL = 15
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
+# Safari calls a tab's title "name"; Chromium browsers call it "title".
+BROWSERS = {
+    "safari": {"app": "Safari", "title_prop": "name", "label": "Safari"},
+    "chrome": {"app": "Google Chrome", "title_prop": "title", "label": "Chrome"},
+}
+
 JXA_LIST_TABS = r"""
-(() => {
-  const safari = Application('Safari');
-  if (!safari.running()) return JSON.stringify({error: 'not_running'});
-  const out = [];
-  const windows = safari.windows();
-  for (let w = 0; w < windows.length; w++) {
-    const win = windows[w];
-    let tabs;
-    try { tabs = win.tabs(); } catch (e) { continue; }
-    const entry = {window: w + 1, tabs: []};
-    for (let t = 0; t < tabs.length; t++) {
-      let url = null, title = null;
-      try { url = tabs[t].url(); } catch (e) {}
-      try { title = tabs[t].name(); } catch (e) {}
-      if (url) entry.tabs.push({url: url, title: title || url});
-    }
-    if (entry.tabs.length) out.push(entry);
+(function (appName, titleProp) {
+  var result = {status: 'ok', windows: []};
+  var app;
+  try { app = Application(appName); } catch (e) {
+    return JSON.stringify({status: 'not_installed', windows: []});
   }
-  return JSON.stringify({windows: out});
-})();
+  try {
+    if (!app.running()) return JSON.stringify({status: 'not_running', windows: []});
+    var windows = app.windows();
+    for (var w = 0; w < windows.length; w++) {
+      var tabs;
+      try { tabs = windows[w].tabs(); } catch (e) { continue; }
+      var entry = {window: w + 1, tabs: []};
+      for (var t = 0; t < tabs.length; t++) {
+        var url = null, title = null;
+        try { url = tabs[t].url(); } catch (e) {}
+        try { title = tabs[t][titleProp](); } catch (e) {}
+        if (url) entry.tabs.push({url: url, title: title || url});
+      }
+      if (entry.tabs.length) result.windows.push(entry);
+    }
+  } catch (e) {
+    var msg = String(e && e.message || e);
+    var status = (msg.indexOf('1743') !== -1 || msg.toLowerCase().indexOf('not allowed') !== -1)
+      ? 'not_allowed' : 'error';
+    return JSON.stringify({status: status, message: msg, windows: []});
+  }
+  return JSON.stringify(result);
+})
 """
 
 
-def get_safari_tabs():
-    """Return [{window: n, tabs: [{url, title}, ...]}, ...] from the running Safari."""
+def read_browser(key):
+    """Return {'status': ..., 'windows': [{window, tabs: [{url, title}]}]} for one browser."""
+    cfg = BROWSERS[key]
+    script = JXA_LIST_TABS + f"({json.dumps(cfg['app'])}, {json.dumps(cfg['title_prop'])});"
     try:
         proc = subprocess.run(
-            ["osascript", "-l", "JavaScript", "-e", JXA_LIST_TABS],
+            ["osascript", "-l", "JavaScript", "-e", script],
             capture_output=True, text=True, timeout=60,
         )
     except FileNotFoundError:
         sys.exit("osascript not found — this tool must be run on macOS.")
     if proc.returncode != 0:
         err = proc.stderr.strip()
-        if "-1743" in err or "not allowed" in err.lower():
-            sys.exit(
-                "macOS blocked access to Safari. Allow it under\n"
-                "System Settings > Privacy & Security > Automation > (your terminal) > Safari,\n"
-                "then run this again."
-            )
-        sys.exit(f"Could not read Safari tabs: {err or 'unknown osascript error'}")
-    data = json.loads(proc.stdout.strip())
-    if data.get("error") == "not_running":
-        sys.exit("Safari is not running — open it (with the tabs you want) and try again.")
-    return data["windows"]
+        status = "not_allowed" if ("-1743" in err or "not allowed" in err.lower()) else "error"
+        return {"status": status, "message": err, "windows": []}
+    return json.loads(proc.stdout.strip())
+
+
+def get_all_tabs(browser_keys):
+    """Read every requested browser. Returns [{browser, window, tabs}, ...]."""
+    groups = []
+    for key in browser_keys:
+        label = BROWSERS[key]["label"]
+        info = read_browser(key)
+        status = info.get("status")
+        if status == "ok":
+            n = sum(len(w["tabs"]) for w in info["windows"])
+            print(f"  {label}: {n} tabs in {len(info['windows'])} window(s).")
+            for w in info["windows"]:
+                groups.append({"browser": label, "window": w["window"], "tabs": w["tabs"]})
+        elif status == "not_running":
+            print(f"  {label}: not running — skipped.")
+        elif status == "not_installed":
+            print(f"  {label}: not installed — skipped.")
+        elif status == "not_allowed":
+            print(f"  ! {label}: macOS blocked access. Allow it under System Settings >\n"
+                  f"    Privacy & Security > Automation > (your terminal) > {BROWSERS[key]['app']}.",
+                  file=sys.stderr)
+        else:
+            print(f"  ! {label}: could not read tabs "
+                  f"({info.get('message', 'unknown error')}).", file=sys.stderr)
+    return groups
 
 
 class _PageParser(HTMLParser):
@@ -297,12 +334,12 @@ def domain_of(url):
     return m.group(1).replace("www.", "") if m else url
 
 
-def build_markdown(windows, generated_at):
-    total = sum(len(w["tabs"]) for w in windows)
-    lines = [f"# Safari Tabs — {generated_at:%B %-d, %Y at %-I:%M %p}",
-             "", f"{total} tabs across {len(windows)} window(s).", ""]
-    for w in windows:
-        lines.append(f"## Window {w['window']} ({len(w['tabs'])} tabs)")
+def build_markdown(groups, generated_at):
+    total = sum(len(w["tabs"]) for w in groups)
+    lines = [f"# Open Tabs — {generated_at:%B %-d, %Y at %-I:%M %p}",
+             "", f"{total} tabs across {len(groups)} window(s).", ""]
+    for w in groups:
+        lines.append(f"## {w['browser']} — Window {w['window']} ({len(w['tabs'])} tabs)")
         lines.append("")
         for tab in w["tabs"]:
             title = tab.get("page_title") or tab["title"]
@@ -312,11 +349,11 @@ def build_markdown(windows, generated_at):
     return "\n".join(lines)
 
 
-def build_html(windows, generated_at, ai_used):
-    total = sum(len(w["tabs"]) for w in windows)
+def build_html(groups, generated_at, ai_used):
+    total = sum(len(w["tabs"]) for w in groups)
     e = html.escape
     sections = []
-    for w in windows:
+    for w in groups:
         cards = []
         for tab in w["tabs"]:
             title = tab.get("page_title") or tab["title"]
@@ -329,7 +366,7 @@ def build_html(windows, generated_at, ai_used):
       </div>""")
         sections.append(f"""
     <section>
-      <h2>Window {w['window']} <span class="count">{len(w['tabs'])} tabs</span></h2>
+      <h2>{e(w['browser'])} — Window {w['window']} <span class="count">{len(w['tabs'])} tabs</span></h2>
       {''.join(cards)}
     </section>""")
     note = ("Descriptions generated by Claude." if ai_used
@@ -339,7 +376,7 @@ def build_html(windows, generated_at, ai_used):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Safari Tabs — {generated_at:%Y-%m-%d %H:%M}</title>
+<title>Open Tabs — {generated_at:%Y-%m-%d %H:%M}</title>
 <style>
   :root {{
     --bg: #f6f6f8; --card: #ffffff; --ink: #1c1c22; --muted: #6b6b76;
@@ -373,9 +410,9 @@ def build_html(windows, generated_at, ai_used):
 <body>
 <main>
   <header>
-    <h1>Safari Tabs</h1>
+    <h1>Open Tabs</h1>
     <p>{generated_at:%A, %B %-d, %Y at %-I:%M %p} &middot; {total} tabs
-       across {len(windows)} window(s)</p>
+       across {len(groups)} window(s)</p>
   </header>
   {''.join(sections)}
   <footer>{note} Exported with export_safari_tabs.py.</footer>
@@ -386,7 +423,11 @@ def build_html(windows, generated_at, ai_used):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Export Safari tabs with AI descriptions.")
+    ap = argparse.ArgumentParser(
+        description="Export Safari and Chrome tabs with AI descriptions.")
+    ap.add_argument("--browsers", default="safari,chrome",
+                    help="comma-separated browsers to read: safari, chrome "
+                         "(default: safari,chrome)")
     ap.add_argument("--no-ai", action="store_true",
                     help="skip Claude; use each page's own metadata as the description")
     ap.add_argument("--no-fetch", action="store_true",
@@ -399,12 +440,19 @@ def main():
                     help="don't open the export location in Finder when done")
     args = ap.parse_args()
 
-    print("Reading Safari tabs...")
-    windows = get_safari_tabs()
-    all_tabs = [tab for w in windows for tab in w["tabs"]]
+    browser_keys = [b.strip().lower() for b in args.browsers.split(",") if b.strip()]
+    unknown = [b for b in browser_keys if b not in BROWSERS]
+    if unknown:
+        sys.exit(f"Unknown browser(s): {', '.join(unknown)}. "
+                 f"Choose from: {', '.join(BROWSERS)}.")
+
+    print("Reading browser tabs...")
+    groups = get_all_tabs(browser_keys)
+    all_tabs = [tab for w in groups for tab in w["tabs"]]
     if not all_tabs:
-        sys.exit("No open tabs found in Safari.")
-    print(f"  Found {len(all_tabs)} tabs in {len(windows)} window(s).")
+        sys.exit("No open tabs found — make sure Safari and/or Chrome is running "
+                 "with the tabs you want.")
+    print(f"  Total: {len(all_tabs)} tabs in {len(groups)} window(s).")
 
     if not args.no_fetch:
         print("Fetching page details (this can take a minute)...")
@@ -427,13 +475,13 @@ def main():
     now = datetime.datetime.now()
     out_dir = os.path.expanduser(args.output_dir)
     os.makedirs(out_dir, exist_ok=True)
-    stem = f"Safari Tabs {now:%Y-%m-%d %H.%M}"
+    stem = f"Open Tabs {now:%Y-%m-%d %H.%M}"
     html_path = os.path.join(out_dir, stem + ".html")
     md_path = os.path.join(out_dir, stem + ".md")
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(windows, now, ai_used))
+        f.write(build_html(groups, now, ai_used))
     with open(md_path, "w", encoding="utf-8") as f:
-        f.write(build_markdown(windows, now))
+        f.write(build_markdown(groups, now))
 
     print(f"\nDone — {len(all_tabs)} tabs exported:")
     print(f"  {html_path}")
