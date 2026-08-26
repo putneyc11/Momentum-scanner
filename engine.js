@@ -28,6 +28,7 @@
 const fs = require("fs");
 const path = require("path");
 const D = require("./lib/data");
+const { startDashboard } = require("./lib/dashboard");
 const { PaperBroker } = require("./lib/broker");
 const { DEFAULTS, prepSeries, signalAt, exitCheck } = require("./lib/strategy");
 const { runBacktest } = require("./lib/backtest");
@@ -128,6 +129,22 @@ async function cmdTrade() {
   log(`connected to PAPER account ${acct.account_number} — equity $${acct.equity}`);
   journal({ kind: "start", equity: acct.equity });
 
+  /* live dashboard: real-time equity line chart + trade markers */
+  const dashStatus = { session: "starting", positions: [], universe: 0 };
+  const dashPort = process.env.PORT || 8788;
+  startDashboard({ port: dashPort, stateDir: STATE, status: dashStatus });
+  log(`dashboard listening on :${dashPort}${process.env.DASH_TOKEN ? " (token-protected)" : ""}`);
+  const EQ_FILE = path.join(STATE, "equity.jsonl");
+  let lastEqSample = 0;
+  const sampleEquity = (eq) => {
+    const v = Number(eq);
+    if (!isFinite(v) || Date.now() - lastEqSample < 25000) return;
+    lastEqSample = Date.now();
+    fs.mkdirSync(STATE, { recursive: true });
+    fs.appendFileSync(EQ_FILE, JSON.stringify({ t: Date.now(), eq: +v.toFixed(2) }) + "\n");
+  };
+  sampleEquity(acct.equity);
+
   let P = loadParams();
   let universe = [];               // [{symbol, pct, prevClose}]
   let lastDiscover = 0;
@@ -156,6 +173,7 @@ async function cmdTrade() {
         journal({ kind: "day", day, params: P });
       }
       const inSession = nowMin >= 240 && nowMin < 960;
+      dashStatus.session = !inSession ? "closed" : nowMin < 570 ? "premarket" : nowMin >= P.flattenMin ? "flatten" : "regular";
       if (!inSession) {
         /* after the close: record + tune exactly once */
         if (nowMin >= 965 && nowMin < 1200 && !recorded) {
@@ -186,6 +204,7 @@ async function cmdTrade() {
       if (Date.now() - lastDiscover > 5 * 60000) {
         lastDiscover = Date.now();
         universe = await D.discover(keys).catch((e) => { log("discover error:", e.message); return universe; });
+        dashStatus.universe = universe.length;
         log(`universe: ${universe.length} — ${universe.slice(0, 8).map((u) => u.symbol).join(",")}`);
       }
 
@@ -198,12 +217,16 @@ async function cmdTrade() {
           for (const p of positions) journal({ kind: "exit", sym: p.symbol, reason: "flatten", pnl: Number(p.unrealized_pl) });
           for (const k of Object.keys(posMeta)) delete posMeta[k];
         }
+        dashStatus.positions = [];
+        const af = await broker.account().catch(() => null);
+        if (af) sampleEquity(af.equity);
         await sleep(60000);
         continue;
       }
 
       const positions = await broker.positions().catch(() => []);
       const held = new Set(positions.map((p) => p.symbol));
+      dashStatus.positions = [...held];
       for (const k of Object.keys(posMeta)) {
         if (!held.has(k)) { // broker closed it (stop/target hit server-side)
           journal({ kind: "exit", sym: k, reason: "bracket" });
@@ -214,6 +237,7 @@ async function cmdTrade() {
 
       /* daily loss halt */
       const a = await broker.account().catch(() => null);
+      if (a) sampleEquity(a.equity);
       if (a && !halted && Number(a.equity) <= dayStartEq * (1 - P.maxDailyLossPct / 100)) {
         halted = true;
         log(`daily loss limit hit (${P.maxDailyLossPct}%) — flattening, no more entries today`);

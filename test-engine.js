@@ -114,5 +114,43 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(new PaperBroker({ id: "k", secret: "s" }).base === PAPER_URL, "broker pins the paper endpoint");
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+/* ---- dashboard ---- */
+(async () => {
+  const os = require("os");
+  const fsx = require("fs");
+  const pathx = require("path");
+  const { startDashboard } = require("./lib/dashboard");
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "dash-"));
+  const now = Date.now();
+  fsx.writeFileSync(pathx.join(dir, "equity.jsonl"),
+    [{ t: now - 60000, eq: 100000 }, { t: now - 30000, eq: 100250 }, { t: now, eq: 100100 }]
+      .map((o) => JSON.stringify(o)).join("\n") + "\n");
+  fsx.writeFileSync(pathx.join(dir, "journal.jsonl"),
+    [{ t: new Date(now - 45000).toISOString(), kind: "entry", sym: "GAPPY", qty: 100, px: 4.5, stop: 4.2 },
+     { t: new Date(now - 10000).toISOString(), kind: "exit", sym: "GAPPY", reason: "target", pnl: 75 },
+     { t: new Date(now - 5000).toISOString(), kind: "day", day: "x" }]
+      .map((o) => JSON.stringify(o)).join("\n") + "\n");
+  const listen = (srv) => new Promise((r) => srv.on("listening", () => r(srv.address().port)));
+  const srv = startDashboard({ port: 0, stateDir: dir, status: { session: "regular", positions: ["GAPPY"], universe: 5 } });
+  const port = await listen(srv);
+  const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+  ok(html.includes("Account value") && html.includes("<canvas"), "dashboard serves the equity chart page");
+  const st = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
+  ok(st.equity.length === 3 && st.equity[2].eq === 100100, "equity samples stream through /api/state");
+  ok(st.trades.length === 2 && st.trades[1].pnl === 75, "trade events (entry/exit only) reach the chart");
+  ok(st.status.universe === 5 && st.status.positions[0] === "GAPPY", "live status rides along");
+  ok((await fetch(`http://127.0.0.1:${port}/health`)).status === 200, "health endpoint is open");
+  srv.close();
+  /* token guard */
+  process.env.DASH_TOKEN = "sekret";
+  const srv2 = startDashboard({ port: 0, stateDir: dir, status: {} });
+  const port2 = await listen(srv2);
+  ok((await fetch(`http://127.0.0.1:${port2}/`)).status === 401, "token-protected dashboard rejects anonymous visits");
+  ok((await fetch(`http://127.0.0.1:${port2}/?token=sekret`)).status === 200, "…and admits the token");
+  ok((await fetch(`http://127.0.0.1:${port2}/health`)).status === 200, "…while /health stays open for the platform");
+  srv2.close();
+  delete process.env.DASH_TOKEN;
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();

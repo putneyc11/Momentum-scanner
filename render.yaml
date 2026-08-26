@@ -3,18 +3,25 @@
 # branch claude/algo-paper-trader. You are prompted for the two Alpaca
 # PAPER keys in the dashboard — they never touch the repo.
 services:
-  - type: worker
+  # web (not worker) so the built-in live dashboard gets a public URL —
+  # the same process trades AND serves the equity chart on $PORT
+  - type: web
     name: momentum-algo-trader
     runtime: node
     branch: claude/algo-paper-trader
     buildCommand: ""
     startCommand: node engine.js trade
+    healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: APCA_API_KEY_ID
         sync: false
       - key: APCA_API_SECRET_KEY
         sync: false
+      # dashboard access token: open https://<service>/?token=<value once>
+      # (find the generated value under the service's Environment tab)
+      - key: DASH_TOKEN
+        generateValue: true
     disk:
       # persists state/ (journal, recorded days, tuning history) across
       # deploys and restarts — this is the engine's growing "memory"
