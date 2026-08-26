@@ -1506,12 +1506,13 @@ export default function App() {
               const p = sn.latestTrade.p;
               if (p < 0.03 || p > Number(maxPrice || 9999)) continue;
               const pct = ((p - db.c) / db.c) * 100;
-              if (pct < 3) continue;
-              ahc[s] = pct;
+              /* NO percentage floor — the AH table is an unconditional
+                 top-10 ranking of everything that printed after the close */
+              ahc[s] = { symbol: s, price: p, pct, close: db.c };
             }
           } catch (e) {}
         }
-        ahCandRef.current = Object.keys(ahc).sort((a, b) => ahc[b] - ahc[a]).slice(0, 25);
+        ahCandRef.current = Object.values(ahc).sort((a, b) => b.pct - a.pct).slice(0, 15);
       } else ahCandRef.current = [];
       setFound(Object.keys(cands).length);
       setNote("");
@@ -1554,10 +1555,9 @@ export default function App() {
        a stock that did nothing all day but gapped after the close enters here */
     const pool = Array.from(new Set([
       ...listSyms, ...watchAllRef.current, ...moversRef.current, ...hotRef.current,
-      ...(ahOn ? ahCandRef.current : []),
+      ...(ahOn ? ahCandRef.current.map((c) => c.symbol) : []),
     ])).slice(0, ahOn ? 60 : 45);
     if (pool.length === 0) return;
-    const ahRows = [];
     const ahAll = {};
     try {
       const allBars = {};
@@ -1589,6 +1589,8 @@ export default function App() {
         /* ---- after-hours movers: change vs today's 4:00 PM regular close,
                 same per-minute activity filter as the main list ---- */
         if (ahOn && arr.length >= 2) {
+          /* gather AH data per symbol — the table itself is built below from
+             the full-market snapshot ranking, with NO qualification gates */
           let regClose = null, ahVol = 0;
           const ahBars = [];
           for (const b of arr) {
@@ -1596,22 +1598,8 @@ export default function App() {
             else { ahVol += b.v; ahBars.push(b); }
           }
           if (regClose && etMinutes(last.t) >= 960 && ahBars.length >= 1) {
-            const l3 = ahBars.slice(-3);
-            const rate = l3.reduce((x, y) => x + y.v, 0) / l3.length;
             const ahPct = ((last.c - regClose) / regClose) * 100;
-            ahAll[s] = { pct: ahPct, vol: ahVol }; /* every symbol, no gates — for the main rows */
-            /* qualify ONCE (≥3% AH gain, ≥5k/min avg, ≥1M shares traded on
-               the FULL day) and the ticker stays for the whole AH session;
-               display only while its gain is positive */
-            const sessVol = arr.reduce((x, y) => x + y.v, 0);
-            /* FULL-MARKET gates: a quiet-all-day stock gapping on evening
-               news must qualify — no full-day volume requirement, just a
-               real AH tape (≥3% up, ≥5k/min rate, ≥25k AH shares) */
-            if (ahBars.length >= 2 && ahPct >= 3 && rate >= AH_MIN_RATE && ahVol >= AH_MIN_VOL) ahStickyRef.current.add(s);
-            if (ahBars.length >= 2 && ahStickyRef.current.has(s) && ahPct > 0) {
-              const sc = setupScore({ pct: ahPct, dayVol: sessVol }, arr, getFloat(s));
-              ahRows.push({ symbol: s, price: last.c, pct: ahPct, dayVol: ahVol, score: sc.score, grade: sc.grade, bars: ahBars });
-            }
+            ahAll[s] = { pct: ahPct, vol: ahVol, bars: ahBars, price: last.c, sessVol: arr.reduce((x, y) => x + y.v, 0) };
           }
         }
         if (arr.length < 8) continue;
@@ -1695,12 +1683,23 @@ export default function App() {
       }
       haltRef.current = new Set(newHalt);
       setHaltedSyms(newHalt);
-      ahRows.sort((a, b) => b.pct - a.pct || b.score - a.score); /* top 10 by AH GAIN — it's a gainers list */
-      const ahTop = ahOn ? ahRows.slice(0, 10) : [];
+      /* AH TABLE: ALWAYS the top 10 by AH % across the whole market — no
+         percentage floor, no volume floor. The snapshot sweep ranks; 1-min
+         bars (for pool symbols) refine the %, volume and sparkline. */
+      const ahTop = [];
+      if (ahOn) {
+        for (const c of ahCandRef.current) {
+          if (ahTop.length >= 10) break;
+          const info = ahAll[c.symbol];
+          const pct = info ? info.pct : c.pct;
+          const sc = setupScore({ pct, dayVol: info ? info.sessVol : 0 }, allBars[c.symbol], getFloat(c.symbol));
+          ahTop.push({ symbol: c.symbol, price: info ? info.price : c.price, pct, dayVol: info ? info.vol : null, score: sc.score, grade: sc.grade, bars: info ? info.bars : null });
+        }
+        ahTop.sort((a, b) => b.pct - a.pct);
+      }
       ahRef.current = ahTop.map((r) => r.symbol);
       setAhMoves(ahTop);
       setAhInfo(ahOn ? ahAll : {});
-      if (!ahOn) ahStickyRef.current = new Set(); /* fresh slate each session */
     } catch (e) {}
   }, [keys, feed, alertOnce, getFloat]);
   useEffect(() => { ignScanRef.current = ignScan; }, [ignScan]);
@@ -2061,7 +2060,7 @@ export default function App() {
         <div style={{ margin: "12px 14px 0", background: C.panel, border: `1px solid ${C.ema21}66`, borderRadius: 10, overflow: "hidden" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: `1px solid ${C.ema21}33` }}>
             <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, color: C.ema21, textTransform: "uppercase" }}>🌙 After hours</span>
-            <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>full-market top 10 · vs 4:00 PM close · stays all session</span>
+            <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>top 10 by AH % · whole market · vs 4:00 PM close · no filters</span>
           </div>
           <div className="noscrollbar" style={{ display: "flex", gap: mobile ? 6 : 10, padding: "7px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase" }}>
             <span style={{ minWidth: 40 }}>Rank</span>
@@ -2085,7 +2084,7 @@ export default function App() {
         </div>
       )}
       <div style={{ padding: "0 14px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
-        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol is swept vs the 4:00 close, and the top 10 AH gainers (≥3% since the close, ≥{fv(AH_MIN_RATE)}/min avg, ≥{fv(AH_MIN_VOL)} AH shares) qualify once and stay while positive, ranked by AH gain. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
+        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are always shown — no percentage or volume requirements. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
       </div>
 
       {sel && (

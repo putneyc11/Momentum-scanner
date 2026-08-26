@@ -116,6 +116,15 @@ function barsAH(sym, n){
   const ahIdx = bodyAH.indexOf('After hours');
   console.log(ahIdx > -1 && bodyAH.slice(ahIdx).includes('QUIET') ? '✓ full-market AH discovery lists a quiet-all-day 5 PM gapper' : '✗ QUIET missing from the After hours table');
   console.log(!bodyAH.slice(0, ahIdx).includes('QUIET') ? '✓ …and it stays OFF the day list (only +2% on the day)' : '✗ QUIET leaked into the day list');
+  const ahRowCount = await page.evaluate(() => {
+    const moon = [...document.querySelectorAll('span')].find(sp => (sp.textContent || '').trim() === '🌙 After hours');
+    if (!moon) return -1;
+    let card = moon.parentElement;
+    while (card && !/border-radius: 10px/.test(card.getAttribute('style') || '')) card = card.parentElement;
+    if (!card) return -2;
+    return card.querySelectorAll('span[aria-label]').length; // one bell per row
+  });
+  console.log(ahRowCount === 10 ? '✓ After Hours ALWAYS shows 10 rows — no % or volume gates' : '✗ AH row count: ' + ahRowCount);
 
   // ---- 5) per-symbol bell: mute GOODA → dropped from the push-monitor sync ----
   const muteClicked = await page.evaluate(() => {
