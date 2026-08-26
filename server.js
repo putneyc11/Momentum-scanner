@@ -313,7 +313,7 @@ async function monitorTick() {
     const off = new Date();
     const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
     const diff = off.getTime() - et.getTime();
-    const d = new Date(et); d.setHours(6, 0, 0, 0);
+    const d = new Date(et); d.setHours(4, 0, 0, 0); /* full premarket window — PMH and baselines track from the 4:00 AM open */
     const start = new Date(d.getTime() + diff).toISOString();
     const nowMs = Date.now();
     for (let i = 0; i < pool.length; i += 15) {
