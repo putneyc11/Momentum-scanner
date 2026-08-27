@@ -16,10 +16,18 @@ lose.
 1. **Discovers** the same stocks the scanner surfaces (premarket snapshot
    gates 4:00–9:30 ET, daily-bar gates after the open, split-guarded).
 2. **Trades them on the Alpaca paper account, 4:00 AM to 8:00 PM ET** —
-   premarket, regular hours, and after hours — with a FIVE-MODEL ENSEMBLE
+   premarket, regular hours, and after hours — with a SEVEN-MODEL ENSEMBLE
    (`lib/strategies.js`) sharing one book. Each symbol is claimed by the
    first pod whose signal fires; each pod has its own tuned params and its
-   own position slots (account-wide cap 6):
+   own position slots (account-wide cap 8). Two RIDERS come first — they
+   hold with NO profit target as long as price stays within `hwmTrailPct`%
+   of its high-water mark, so a 100%…800% runner is held for the whole move:
+   - **moon** — Moonshot Rider: extra-picky Gap-and-Go entry (4/5
+     confluence), ride-ratchet exit (default −15% off the high)
+   - **surge** — Surge Rider: Volume Igniter entry, ride-ratchet exit
+     (default −12% off the high)
+   Five QUICK-STRIKE pods bank small wins (~1.2–1.3R targets, 90% sold
+   there, dip re-entries):
    - **gapgo** — Gap-and-Go Confluence: PMH/ORB structure break plus a
      confluence vote across VWAP, EMA 8/21, volume surge, RSI, Supertrend
      (`lib/strategy.js`)
@@ -31,9 +39,13 @@ lose.
      burst; stop under the run
    - **redgreen** — Red-to-Green: the first volume-backed cross back above
      the 9:30 open
-   RTH entries carry a broker-held protective stop; extended-hours entries
-   use marketable limit orders (Alpaca's off-RTH rules) with stops managed
-   by the engine off the live tape. At each pod's **planned exit**
+   Exits run on a SECOND-BY-SECOND fast tick: one batched latest-trades
+   call per second enforces stops, ride ratchets and scale-out targets on
+   live prints, because these moves reverse in seconds — the 15s bar loop
+   handles entries and the slower structure exits. RTH entries carry a
+   broker-held protective stop; extended-hours entries use marketable limit
+   orders (Alpaca's off-RTH rules) with stops managed by the engine off the
+   live tape. At each pod's **planned exit**
    (`targetR` x risk) the engine scales out `scaleOutPct` (default 90%) and
    lets the runner ride a trailing stop floored at break-even. VWAP-loss,
    trailing and time exits are engine-managed with the owning pod's params.

@@ -138,13 +138,36 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 /* ---- the five-pod ensemble ---- */
 {
   const { STRATS } = require("./lib/strategies");
-  ok(STRATS.length === 5 && new Set(STRATS.map((s) => s.key)).size === 5, "five strategy pods registered with unique keys");
+  ok(STRATS.length === 7 && new Set(STRATS.map((s) => s.key)).size === 7, "seven strategy pods registered with unique keys");
   const mgmtKeys = ["targetR", "scaleOutPct", "maxPositions", "riskPct", "stopAtrMult", "flattenMin", "reentryLimit", "cooldownMin"];
   ok(STRATS.every((st) => typeof st.signalAt === "function" && mgmtKeys.every((k) => st.DEFAULTS[k] != null)), "every pod carries a full management param set for the shared exit engine");
-  /* quick-strike profile: small wins banked close, dip re-entries allowed */
-  ok(STRATS.every((st) => st.DEFAULTS.targetR <= 1.5 && st.DEFAULTS.scaleOutPct >= 90), "every pod takes profit close (targetR ≤ 1.5, ≥90% banked at the target)");
-  ok(STRATS.every((st) => st.DEFAULTS.reentryLimit >= 4 && st.DEFAULTS.cooldownMin <= 5), "every pod can re-enter dips (≥4 entries/symbol/day, ≤5 min cooldown)");
-  ok(STRATS.every((st) => st.RANGES.targetR[0] <= 1), "the tuner may search targets below 1R");
+  /* quick-strike pods: small wins banked close, dip re-entries allowed */
+  const quick = STRATS.filter((s) => s.style === "quick");
+  ok(quick.length === 5 && quick.every((st) => st.DEFAULTS.targetR <= 1.5 && st.DEFAULTS.scaleOutPct >= 90), "quick pods take profit close (targetR ≤ 1.5, ≥90% banked at the target)");
+  ok(quick.every((st) => st.DEFAULTS.reentryLimit >= 4 && st.DEFAULTS.cooldownMin <= 5), "quick pods re-enter dips (≥4 entries/symbol/day, ≤5 min cooldown)");
+  ok(quick.every((st) => st.RANGES.targetR[0] <= 1), "the tuner may search quick targets below 1R");
+  /* rider pods: no target ever, the hwm ratchet is the only planned exit */
+  const riders = STRATS.filter((s) => s.style === "ride");
+  ok(riders.length === 2 && riders.every((st) => st.DEFAULTS.hwmTrailPct > 0 && st.DEFAULTS.targetR === 0 && st.DEFAULTS.scaleOutPct === 100 && !st.DEFAULTS.vwapExit), "riders have NO profit target — only the %-off-high ratchet");
+  ok(riders.every((st) => !("targetR" in st.RANGES) && !("scaleOutPct" in st.RANGES)), "the tuner can never hand a rider a profit target");
+  ok(STRATS[0].style === "ride" && STRATS[1].style === "ride", "riders are listed first: priority claim on the strongest breakouts");
+
+  /* the ride ratchet holds a monster run and exits on the first deep dip */
+  {
+    const P = { ...DEFAULTS, hwmTrailPct: 15, targetR: 0, vwapExit: 0, timeStopMin: 9999, trailAfterR: 99, flattenMin: 1195 };
+    const bars = [];
+    for (let m = 600; m < 615; m++) bars.push(bar(m, 2, 2.02, 1.98, 2.0, 30000));
+    for (let k = 0; k < 20; k++) { const c = 2 + (k + 1) * 0.3; bars.push(bar(615 + k, c - 0.12, c + 0.02, c - 0.15, c, 60000)); }
+    bars.push(bar(635, 8, 8.05, 7.3, 7.5, 40000)); // −9% off the 8.05 high: hold
+    const S = prepSeries(bars, P);
+    const pos = { entry: 2.1, stop: 1.9, risk: 0.2, hwm: 2.1, barsHeld: 0 };
+    let ex = null;
+    for (let i = 15; i < bars.length && !ex; i++) ex = exitCheck(S, bars, i, pos, P);
+    ok(ex === null, "rider holds through a ~300% run and a shallow (−9%) dip");
+    bars.push(bar(636, 7.5, 7.6, 6.5, 6.6, 80000)); // dips >15% off the high
+    const ex2 = exitCheck(prepSeries(bars, P), bars, bars.length - 1, pos, P);
+    ok(!!ex2 && ex2.reason === "stop" && approx(ex2.price, 8.05 * 0.85, 1e-9), "…and exits at the ratchet on the first dip >15% off the high");
+  }
   const get = (key) => STRATS.find((s) => s.key === key);
 
   /* VWAP Reclaim: a real dip under VWAP, then a volume-backed reclaim */

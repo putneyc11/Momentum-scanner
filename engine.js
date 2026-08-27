@@ -51,7 +51,7 @@ const TUNE_LOG = path.join(STATE, "tune-log.jsonl");
 const ALLOC_FILE = path.join(STATE, "alloc.json");
 const PDIR = path.join(STATE, "params"); /* tuned pod params persist on the Render disk */
 
-const GLOBAL_MAX_POS = 6;   /* account-wide cap across all pods */
+const GLOBAL_MAX_POS = 8;   /* account-wide cap across all pods */
 const DAY_LOSS_PCT = 3;     /* account-wide daily halt */
 const FLATTEN_MIN = 1195;   /* 19:55 ET */
 
@@ -229,6 +229,7 @@ async function cmdTrade() {
   const posMeta = {};              // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty}
   const entriesToday = {};         // "strat:sym" -> count
   const cooldownUntil = {};
+  const selling = new Set();       // per-symbol guard: fast tick vs slow loop
   let dayStartEq = Number(acct.equity);
   let halted = false;
   let day = D.etDay(Date.now());
@@ -236,6 +237,71 @@ async function cmdTrade() {
   let running = true;
   process.on("SIGTERM", () => { running = false; });
   process.on("SIGINT", () => { running = false; });
+
+  /* FAST EXIT TICK — every SECOND, one batched latest-trades call for the
+     open positions. These moves reverse in seconds: the ride ratchet, stops
+     and scale-out targets are enforced on live prints, not on the next
+     bar fetch. Entries stay on the bar loop (signals are bar structures). */
+  let fastBusy = false;
+  const fastTick = async () => {
+    if (fastBusy || !running || halted) return;
+    const syms = Object.keys(posMeta).filter((s) => !selling.has(s) && posMeta[s].qty > 0);
+    if (!syms.length) return;
+    const nowMin2 = D.etMinute(Date.now());
+    if (nowMin2 < 240 || nowMin2 >= FLATTEN_MIN) return; /* the slow loop owns the flatten window */
+    const ext2 = nowMin2 < 570 || nowMin2 >= 960;
+    fastBusy = true;
+    try {
+      const tr = await D.latestTrades(keys, syms);
+      for (const sym of syms) {
+        const meta = posMeta[sym];
+        if (!meta || selling.has(sym)) continue;
+        const t = tr[sym];
+        if (!t || Date.now() - t.t > 120000) continue; /* stale print — let the bar loop decide */
+        const p = t.p;
+        if (p > meta.hwm) meta.hwm = p;
+        const P = Ps[meta.strat] || Ps.gapgo;
+        if (P.hwmTrailPct > 0) {
+          const ratchet = meta.hwm * (1 - P.hwmTrailPct / 100);
+          if (ratchet > meta.stop) meta.stop = ratchet;
+        }
+        if (p <= meta.stop) {
+          /* a resting RTH broker stop at this level fills server-side */
+          if (!ext2 && meta.brokerStop != null && meta.stop <= meta.brokerStop + 1e-9) continue;
+          selling.add(sym);
+          log(`FAST EXIT [${meta.strat}] ${sym}: live ${p} <= stop ${meta.stop.toFixed(4)}`);
+          try {
+            await broker.cancelOrders(sym).catch(() => {});
+            if (ext2) await broker.sellLimitExt(sym, meta.qty, Math.max(0.01, p * 0.995));
+            else await broker.sellMarket(sym, meta.qty);
+            journal({ kind: "exit", sym, strat: meta.strat, reason: "stop", qty: meta.qty, pnl: +(((p - meta.entry) * meta.qty).toFixed(2)) });
+            cooldownUntil[sym] = nowMin2 + P.cooldownMin;
+            delete posMeta[sym];
+          } catch (e) { log("fast exit failed:", sym, e.message); }
+          selling.delete(sym);
+        } else if (!meta.scaled && meta.target && p >= meta.target && P.scaleOutPct < 100) {
+          const q = Math.min(meta.qty, Math.max(1, Math.round(meta.qty * P.scaleOutPct / 100)));
+          selling.add(sym);
+          log(`FAST SCALE-OUT [${meta.strat}] ${sym}: ${q}/${meta.qty} at live ${p} (target ${meta.target.toFixed(2)})`);
+          try {
+            await broker.cancelOrders(sym).catch(() => {});
+            if (ext2) await broker.sellLimitExt(sym, q, Math.max(0.01, p * 0.995));
+            else await broker.sellMarket(sym, q);
+            journal({ kind: "scale", sym, strat: meta.strat, reason: "target " + P.scaleOutPct + "%", qty: q, pnl: +(((p - meta.entry) * q).toFixed(2)) });
+            meta.scaled = true;
+            meta.qty -= q;
+            meta.stop = Math.max(meta.stop, meta.entry);
+            if (meta.qty > 0 && !ext2) {
+              await broker.sellStop(sym, meta.qty, meta.stop).catch(() => {});
+              meta.brokerStop = meta.stop;
+            } else if (meta.qty <= 0) delete posMeta[sym];
+          } catch (e) { log("fast scale-out failed:", sym, e.message); }
+          selling.delete(sym);
+        }
+      }
+    } catch (e) {} finally { fastBusy = false; }
+  };
+  const fastId = setInterval(fastTick, 1000);
 
   while (running) {
     try {
@@ -347,6 +413,7 @@ async function cmdTrade() {
           price: Number(p.current_price) || Number(p.avg_entry_price),
           target: m && !m.scaled ? m.target : null,
           stop: m ? m.stop : null,
+          ridePct: mp.hwmTrailPct > 0 ? mp.hwmTrailPct : null, /* riders: exit = dip this % off the high */
           scaled: !!(m && m.scaled), scaleOutPct: mp.scaleOutPct,
           value: Number(p.market_value),
           plUsd: Number(p.unrealized_pl), plPct: Number(p.unrealized_plpc) * 100,
@@ -386,6 +453,7 @@ async function cmdTrade() {
            exits, and — in extended hours — engine-fired stops (Alpaca's own
            stop orders sleep outside 9:30-16:00) */
         for (const p of positions) {
+          if (selling.has(p.symbol)) continue; /* fast tick mid-sale */
           const bars = barsMap[p.symbol] || [];
           if (bars.length < 5) continue;
           const qtyNow = Math.abs(Number(p.qty));
@@ -480,8 +548,9 @@ async function cmdTrade() {
       dashStatus.error = "trade-loop error (auto-retrying): " + e.message;
       log("loop error:", e.message);
     }
-    await sleep(30000);
+    await sleep(15000); /* bar loop: entries + management; the 1s fast tick guards exits */
   }
+  clearInterval(fastId);
   log("shutting down — flattening any open positions");
   await new PaperBroker(keys).closeAll().catch(() => {});
   journal({ kind: "stop" });
