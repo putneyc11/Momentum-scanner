@@ -14,7 +14,11 @@ lose.
 ## What it does
 
 1. **Discovers** the same stocks the scanner surfaces (premarket snapshot
-   gates 4:00–9:30 ET, daily-bar gates after the open, split-guarded).
+   gates 4:00–9:30 ET, daily-bar gates after the open, split-guarded),
+   screened to **Robinhood-tradable tickers only**: listed common
+   stock/ETFs on major exchanges — no OTC/pink sheets, warrants, rights,
+   SPAC units, or preferreds (heuristic on the asset record; Robinhood has
+   no public reference API).
 2. **Trades them on the Alpaca paper account, 4:00 AM to 8:00 PM ET** —
    premarket, regular hours, and after hours — with a SEVEN-MODEL ENSEMBLE
    (`lib/strategies.js`) sharing one book. Each symbol is claimed by the

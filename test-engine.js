@@ -245,6 +245,16 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   D.noteMovers("08/28/2026", ["BBB"]);
   ok(D.moversSeenToday("08/28/2026").join(",") === "BBB" && D.moversSeenToday("08/27/2026").length === 0,
     "the missed-mover memory resets on the ET day rollover");
+
+  /* Robinhood-tradability screen: only what the user could trade there */
+  ok(D.rhTradable({ symbol: "EPOW", exchange: "NASDAQ", name: "Sunrise New Energy Co Ltd Common Stock" }), "listed common stock passes the Robinhood screen");
+  ok(D.rhTradable({ symbol: "BRK.B", exchange: "NYSE", name: "Berkshire Hathaway Class B" }), "class shares (.A/.B) stay tradable");
+  ok(!D.rhTradable({ symbol: "GOEVW", exchange: "NASDAQ", name: "Canoo Inc Warrant" }), "warrants are excluded (not on Robinhood)");
+  ok(!D.rhTradable({ symbol: "ABC.WS", exchange: "NYSE", name: "ABC Corp Warrants" }), "NYSE .WS warrant suffix excluded");
+  ok(!D.rhTradable({ symbol: "SPACU", exchange: "NASDAQ", name: "Spac Acquisition Corp Units" }), "SPAC units excluded");
+  ok(!D.rhTradable({ symbol: "XYZ.R", exchange: "NYSE", name: "XYZ Corp Rights" }), "rights excluded");
+  ok(!D.rhTradable({ symbol: "BANK.PRA", exchange: "NYSE", name: "Bank Corp Preferred Series A" }), "preferred shares excluded");
+  ok(!D.rhTradable({ symbol: "PINKY", exchange: "OTC", name: "Pink Sheet Co" }), "OTC/pink sheets excluded");
 }
 
 /* ---- broker safety rail ---- */
