@@ -206,6 +206,20 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(inRange, "cross-pollinated params stay inside the pod's declared ranges");
 }
 
+/* ---- fast-lane discovery + missed-mover audit ---- */
+{
+  const D = require("./lib/data");
+  ok(D.FAST_PCT_FLOOR < D.RTH_PCT_FLOOR && D.FAST_VOL_FLOOR < D.MIN_DAY_VOL,
+    "fast-lane gates are strictly looser than the classic 25%/5M qualifier");
+  D.noteMovers("08/27/2026", ["EPOW", "RYET"]);
+  D.noteMovers("08/27/2026", ["RYET", "AAA"]);
+  ok(D.moversSeenToday("08/27/2026").sort().join(",") === "AAA,EPOW,RYET",
+    "every mover discovery ranks is remembered for the nightly recording");
+  D.noteMovers("08/28/2026", ["BBB"]);
+  ok(D.moversSeenToday("08/28/2026").join(",") === "BBB" && D.moversSeenToday("08/27/2026").length === 0,
+    "the missed-mover memory resets on the ET day rollover");
+}
+
 /* ---- broker safety rail ---- */
 {
   let threw = false;

@@ -266,11 +266,23 @@ async function cmdTrade() {
            cross-pollinate params, and re-split the risk allocation */
         if (nowMin >= 1205 && nowMin < 1435 && !recorded) {
           recorded = true;
-          const syms = [...new Set([...universe.map((u) => u.symbol), ...Object.keys(posMeta)])];
+          /* record EVERY mover discovery ranked today — traded or not — so
+             the nightly tune learns from the EPOW/RYET-class misses too */
+          const syms = [...new Set([
+            ...universe.map((u) => u.symbol), ...Object.keys(posMeta),
+            ...D.moversSeenToday(day),
+          ])].slice(0, 80);
           if (syms.length) {
             const bars = await D.fetchBars1Min(keys, syms);
             const f = D.recordDay(bars);
             if (f) log("recorded day ->", f);
+          }
+          /* missed-mover audit: ranked movers that never got an entry */
+          const enteredSyms = new Set(Object.keys(entriesToday).map((k) => k.split(":")[1]));
+          const missed = D.moversSeenToday(day).filter((s) => !enteredSyms.has(s));
+          if (missed.length) {
+            log(`missed movers today (${missed.length}): ${missed.slice(0, 20).join(",")}`);
+            journal({ kind: "missed", syms: missed.slice(0, 40) });
           }
           const days = D.loadRecordedDays();
           if (days.length >= 5) {
@@ -285,12 +297,16 @@ async function cmdTrade() {
         continue;
       }
 
-      /* refresh the scanner universe every 5 minutes */
-      if (Date.now() - lastDiscover > 5 * 60000) {
+      /* refresh the scanner universe every 90s — a vertical mover must be
+         seen WHILE it is moving, not five minutes later */
+      if (Date.now() - lastDiscover > 90 * 1000) {
         lastDiscover = Date.now();
+        const prev = new Set(universe.map((u) => u.symbol));
         universe = await D.discover(keys).catch((e) => { log("discover error:", e.message); return universe; });
         dashStatus.universe = universe.length;
-        log(`universe: ${universe.length} — ${universe.slice(0, 8).map((u) => u.symbol).join(",")}`);
+        const fresh = universe.filter((u) => !prev.has(u.symbol));
+        if (fresh.length || universe.length !== prev.size)
+          log(`universe: ${universe.length} — ${universe.slice(0, 8).map((u) => (u.fast ? u.symbol + "*" : u.symbol)).join(",")}${fresh.length ? "  new: " + fresh.map((u) => u.symbol).join(",") : ""}`);
       }
 
       /* session-aware flatten: market orders during RTH, marketable ext-hours
