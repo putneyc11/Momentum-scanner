@@ -124,18 +124,34 @@ function cmdReport() {
 
 /* ------------------------- live paper-trade loop ------------------------- */
 async function cmdTrade() {
-  const keys = D.keysFromEnv();
-  if (!keys) return log("set APCA_API_KEY_ID / APCA_API_SECRET_KEY (PAPER keys) first");
-  const broker = new PaperBroker(keys);
-  const acct = await broker.account();
-  log(`connected to PAPER account ${acct.account_number} — equity $${acct.equity}`);
-  journal({ kind: "start", equity: acct.equity });
-
-  /* live dashboard: real-time equity line chart + trade markers */
-  const dashStatus = { session: "starting", positions: [], universe: 0 };
+  /* the dashboard comes up BEFORE the broker check, so a broken Alpaca
+     connection is visible on the page instead of a silent Render crash loop */
+  const dashStatus = { session: "starting", positions: [], universe: 0, error: null, beat: Date.now() };
   const dashPort = process.env.PORT || 8788;
   startDashboard({ port: dashPort, stateDir: STATE, status: dashStatus });
   log(`dashboard listening on :${dashPort}${process.env.DASH_TOKEN ? " (token-protected)" : ""}`);
+
+  const keys = D.keysFromEnv();
+  if (!keys) {
+    dashStatus.error = "APCA_API_KEY_ID / APCA_API_SECRET_KEY are not set — add your Alpaca PAPER keys under Render → momentum-algo-trader → Environment (the service restarts itself after you save).";
+    log(dashStatus.error);
+  }
+  let broker = null, acct = null;
+  while (!acct) {
+    if (keys) {
+      broker = broker || new PaperBroker(keys);
+      try { acct = await broker.account(); break; }
+      catch (e) {
+        dashStatus.error = `Alpaca PAPER account check failed: ${e.message}. If you regenerated your Alpaca keys, the pair stored on this service is stale — update APCA_API_KEY_ID / APCA_API_SECRET_KEY under Render → Environment. Retrying every 60s.`;
+        log("broker connect failed:", e.message, "— retrying in 60s");
+      }
+    }
+    dashStatus.beat = Date.now();
+    await sleep(60000);
+  }
+  dashStatus.error = null;
+  log(`connected to PAPER account ${acct.account_number} — equity $${acct.equity}`);
+  journal({ kind: "start", equity: acct.equity });
   const EQ_FILE = path.join(STATE, "equity.jsonl");
   let lastEqSample = 0;
   const sampleEquity = (eq) => {
@@ -163,6 +179,8 @@ async function cmdTrade() {
 
   while (running) {
     try {
+      dashStatus.beat = Date.now(); /* dashboard heartbeat: proves the loop is alive */
+      dashStatus.error = null;
       const nowMin = D.etMinute(Date.now());
       const today = D.etDay(Date.now());
       if (today !== day) { // new ET day: fresh slate, reload possibly-tuned params
@@ -361,7 +379,10 @@ async function cmdTrade() {
           }
         }
       }
-    } catch (e) { log("loop error:", e.message); }
+    } catch (e) {
+      dashStatus.error = "trade-loop error (auto-retrying): " + e.message;
+      log("loop error:", e.message);
+    }
     await sleep(30000);
   }
   log("shutting down — flattening any open positions");

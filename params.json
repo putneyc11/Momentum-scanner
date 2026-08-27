@@ -18,7 +18,7 @@
   "scaleOutPct": 85,
   "riskPct": 1,
   "maxNotionalPct": 25,
-  "maxPositions": 3,
+  "maxPositions": 5,
   "maxDailyLossPct": 3,
   "reentryLimit": 2,
   "cooldownMin": 10,
