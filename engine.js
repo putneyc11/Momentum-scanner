@@ -409,7 +409,33 @@ async function cmdTrade() {
         continue;
       }
 
-      const positions = await broker.positions().catch(() => []);
+      let positions = await broker.positions().catch(() => []);
+      /* PURGE: any held position that fails the tradability screen (e.g. a
+         warrant bought before the screen existed) is force-closed on sight —
+         broker-side market close during RTH, escalating marketable limit off
+         hours — and never re-enters (the screen blocks new buys). */
+      const kept = [];
+      for (const p of positions) {
+        if (D.rhTradable({ symbol: p.symbol, exchange: p.exchange })) { kept.push(p); continue; }
+        if (selling.has(p.symbol)) continue;
+        selling.add(p.symbol);
+        const tries = flatTried[p.symbol] || 0;
+        flatTried[p.symbol] = tries + 1;
+        log(`PURGE ${p.symbol}: fails the tradability screen — force closing (attempt ${tries + 1})`);
+        try {
+          await broker.cancelOrders(p.symbol).catch(() => {});
+          if (!ext) await broker.closePosition(p.symbol);
+          else {
+            const q = Math.abs(Number(p.qty));
+            const px = Number(p.current_price) || Number(p.avg_entry_price) || 0.02;
+            await broker.sellLimitExt(p.symbol, q, Math.max(0.01, px * (0.99 - 0.03 * Math.min(tries, 15))));
+          }
+          if (tries === 0) journal({ kind: "exit", sym: p.symbol, strat: (posMeta[p.symbol] || {}).strat, reason: "purged", pnl: Number(p.unrealized_pl) || 0 });
+          delete posMeta[p.symbol];
+        } catch (e) { log("purge failed:", p.symbol, e.message); }
+        selling.delete(p.symbol);
+      }
+      positions = kept;
       const held = new Set(positions.map((p) => p.symbol));
       dashStatus.positions = positions.map((p) => {
         const m = posMeta[p.symbol];

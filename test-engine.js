@@ -255,6 +255,8 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(!D.rhTradable({ symbol: "XYZ.R", exchange: "NYSE", name: "XYZ Corp Rights" }), "rights excluded");
   ok(!D.rhTradable({ symbol: "BANK.PRA", exchange: "NYSE", name: "Bank Corp Preferred Series A" }), "preferred shares excluded");
   ok(!D.rhTradable({ symbol: "PINKY", exchange: "OTC", name: "Pink Sheet Co" }), "OTC/pink sheets excluded");
+  ok(!D.rhTradable({ symbol: "GME.WS" }), "a held GME.WS fails the screen on symbol alone — the purge can catch it with no asset record");
+  ok(typeof new PaperBroker({ id: "k", secret: "s" }).closePosition === "function", "broker exposes the single-position force close the purge uses");
 }
 
 /* ---- broker safety rail ---- */
