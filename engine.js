@@ -230,6 +230,7 @@ async function cmdTrade() {
   const entriesToday = {};         // "strat:sym" -> count
   const cooldownUntil = {};
   const selling = new Set();       // per-symbol guard: fast tick vs slow loop
+  const flatTried = {};            // sym -> flatten attempts today (journal once, escalate price)
   let dayStartEq = Number(acct.equity);
   let halted = false;
   let day = D.etDay(Date.now());
@@ -313,6 +314,7 @@ async function cmdTrade() {
         day = today; halted = false; recorded = false;
         for (const k of Object.keys(entriesToday)) delete entriesToday[k];
         for (const k of Object.keys(cooldownUntil)) delete cooldownUntil[k];
+        for (const k of Object.keys(flatTried)) delete flatTried[k];
         Ps = loadAllParams();
         alloc = loadAlloc();
         const a = await broker.account().catch(() => null);
@@ -378,10 +380,15 @@ async function cmdTrade() {
           await broker.cancelOrders(p.symbol).catch(() => {});
           const q = Math.abs(Number(p.qty));
           const px = Number(p.current_price) || Number(p.avg_entry_price);
+          /* an illiquid name (e.g. a stranded warrant) may not fill the
+             first limit: journal the exit ONCE, and price each retry more
+             aggressively instead of spamming identical orders + rows */
+          const tries = flatTried[p.symbol] || 0;
+          flatTried[p.symbol] = tries + 1;
           try {
-            if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, px * 0.99));
+            if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, px * (0.99 - 0.03 * Math.min(tries, 15))));
             else await broker.sellMarket(p.symbol, q);
-            journal({ kind: "exit", sym: p.symbol, strat: (posMeta[p.symbol] || {}).strat, reason, pnl: Number(p.unrealized_pl) });
+            if (tries === 0) journal({ kind: "exit", sym: p.symbol, strat: (posMeta[p.symbol] || {}).strat, reason, pnl: Number(p.unrealized_pl) || 0 });
           } catch (e) { log("flatten sell:", p.symbol, e.message); }
           cooldownUntil[p.symbol] = nowMin + 10;
           delete posMeta[p.symbol];
@@ -455,7 +462,27 @@ async function cmdTrade() {
         for (const p of positions) {
           if (selling.has(p.symbol)) continue; /* fast tick mid-sale */
           const bars = barsMap[p.symbol] || [];
-          if (bars.length < 5) continue;
+          if (bars.length < 5) {
+            /* DEAD TAPE: a held symbol with no bars all session (stranded
+               warrant, halted-to-nothing name) can never trigger a normal
+               exit — after 3 consecutive dead reads, market-sell it during
+               RTH rather than carrying a corpse forever */
+            const m0 = posMeta[p.symbol];
+            if (m0) {
+              m0.deadTicks = (m0.deadTicks || 0) + 1;
+              if (m0.deadTicks >= 3 && !ext) {
+                log(`DEAD-TAPE LIQUIDATION ${p.symbol}: no prints all session — market sell`);
+                try {
+                  await broker.cancelOrders(p.symbol).catch(() => {});
+                  await broker.sellMarket(p.symbol, Math.abs(Number(p.qty)));
+                  journal({ kind: "exit", sym: p.symbol, strat: m0.strat, reason: "deadtape", pnl: Number(p.unrealized_pl) || 0 });
+                  delete posMeta[p.symbol];
+                } catch (e) { log("dead-tape sell failed:", p.symbol, e.message); }
+              }
+            }
+            continue;
+          }
+          if (posMeta[p.symbol]) posMeta[p.symbol].deadTicks = 0;
           const qtyNow = Math.abs(Number(p.qty));
           const P0 = Ps.gapgo; /* adoption defaults for positions with no meta (restart) */
           const meta = posMeta[p.symbol] || (posMeta[p.symbol] = {
