@@ -141,6 +141,10 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(STRATS.length === 5 && new Set(STRATS.map((s) => s.key)).size === 5, "five strategy pods registered with unique keys");
   const mgmtKeys = ["targetR", "scaleOutPct", "maxPositions", "riskPct", "stopAtrMult", "flattenMin", "reentryLimit", "cooldownMin"];
   ok(STRATS.every((st) => typeof st.signalAt === "function" && mgmtKeys.every((k) => st.DEFAULTS[k] != null)), "every pod carries a full management param set for the shared exit engine");
+  /* quick-strike profile: small wins banked close, dip re-entries allowed */
+  ok(STRATS.every((st) => st.DEFAULTS.targetR <= 1.5 && st.DEFAULTS.scaleOutPct >= 90), "every pod takes profit close (targetR ≤ 1.5, ≥90% banked at the target)");
+  ok(STRATS.every((st) => st.DEFAULTS.reentryLimit >= 4 && st.DEFAULTS.cooldownMin <= 5), "every pod can re-enter dips (≥4 entries/symbol/day, ≤5 min cooldown)");
+  ok(STRATS.every((st) => st.RANGES.targetR[0] <= 1), "the tuner may search targets below 1R");
   const get = (key) => STRATS.find((s) => s.key === key);
 
   /* VWAP Reclaim: a real dip under VWAP, then a volume-backed reclaim */

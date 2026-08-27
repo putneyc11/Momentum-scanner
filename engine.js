@@ -24,12 +24,12 @@
      entries use marketable limit orders (Alpaca's off-RTH rules) with the
      stop managed by the engine off the live tape.
    - At the planned exit (targetR x risk) the engine SCALES OUT scaleOutPct
-     (default 85%) and lets the runner ride a trailing stop floored at
+     (default 90%) and lets the runner ride a trailing stop floored at
      break-even; vwap/time/trailing exits are engine-managed throughout.
    - 19:55 ET: flatten everything. No overnight positions, ever.
    - after the close: record the day's bars into state/days/, then run the
      walk-forward tuner over ALL recorded days and write improved params to
-     params.json — the model gets better as the library of real days grows.
+     state/params/<pod>.json — the models get better as the library grows.
 
    PAPER ONLY. lib/broker.js refuses any non-paper trading URL. */
 
@@ -45,7 +45,6 @@ const { tune } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 
 const ROOT = __dirname;
-const PARAMS_FILE = path.join(ROOT, "params.json"); /* legacy single-model file: seeds gapgo */
 const STATE = D.STATE;
 const JOURNAL = path.join(STATE, "journal.jsonl");
 const TUNE_LOG = path.join(STATE, "tune-log.jsonl");
@@ -56,12 +55,9 @@ const GLOBAL_MAX_POS = 6;   /* account-wide cap across all pods */
 const DAY_LOSS_PCT = 3;     /* account-wide daily halt */
 const FLATTEN_MIN = 1195;   /* 19:55 ET */
 
-/* per-pod params: DEFAULTS <- legacy params.json (gapgo only) <- tuned state */
+/* per-pod params: DEFAULTS <- tuned state (persisted on the Render disk) */
 const loadStratParams = (st) => {
   let P = { ...st.DEFAULTS };
-  if (st.key === "gapgo") {
-    try { P = { ...P, ...JSON.parse(fs.readFileSync(PARAMS_FILE, "utf8")), maxPositions: P.maxPositions }; } catch {}
-  }
   try { P = { ...P, ...JSON.parse(fs.readFileSync(path.join(PDIR, st.key + ".json"), "utf8")) }; } catch {}
   return P;
 };

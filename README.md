@@ -34,7 +34,7 @@ lose.
    RTH entries carry a broker-held protective stop; extended-hours entries
    use marketable limit orders (Alpaca's off-RTH rules) with stops managed
    by the engine off the live tape. At each pod's **planned exit**
-   (`targetR` x risk) the engine scales out `scaleOutPct` (default 85%) and
+   (`targetR` x risk) the engine scales out `scaleOutPct` (default 90%) and
    lets the runner ride a trailing stop floored at break-even. VWAP-loss,
    trailing and time exits are engine-managed with the owning pod's params.
    Everything is flattened at 19:55 — no overnights. Risk is capped per
@@ -105,5 +105,5 @@ noisy and possibly negative — that's the point of paper.
 - `lib/data.js` — Alpaca data + scanner-gate discovery + day recording
 - `lib/broker.js` — paper-pinned Alpaca trading adapter
 - `lib/synth.js` — seeded synthetic gapper days (bootstrap/validation)
-- `params.json` — the current "model"; rewritten by accepted tunes
+- `state/params/<pod>.json` — each model's current params; rewritten by accepted tunes
 - `state/` — journal, recorded days, tune log (gitignored)
