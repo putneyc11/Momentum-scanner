@@ -16,26 +16,43 @@ lose.
 1. **Discovers** the same stocks the scanner surfaces (premarket snapshot
    gates 4:00–9:30 ET, daily-bar gates after the open, split-guarded).
 2. **Trades them on the Alpaca paper account, 4:00 AM to 8:00 PM ET** —
-   premarket, regular hours, and after hours — running up to `maxPositions`
-   at once. The "Gap-and-Go Confluence" strategy (see `lib/strategy.js`):
-   a mandatory structure break (fresh premarket high before the open;
-   PMH/opening-range high after) plus a confluence vote across VWAP,
-   EMA 8/21, volume surge, RSI and Supertrend. RTH entries carry a
-   broker-held protective stop; extended-hours entries use marketable limit
-   orders (Alpaca's off-RTH rules) with stops managed by the engine off the
-   live tape. At the **planned exit** (`targetR` x risk) the engine scales
-   out `scaleOutPct` (default 85%) and lets the runner ride a trailing stop
-   floored at break-even. VWAP-loss, trailing and time exits are
-   engine-managed. Everything is flattened at 19:55 — no overnights. Risk
-   is capped per trade (`riskPct`), per position (`maxNotionalPct`), and
-   per day (`maxDailyLossPct` halt).
+   premarket, regular hours, and after hours — with a FIVE-MODEL ENSEMBLE
+   (`lib/strategies.js`) sharing one book. Each symbol is claimed by the
+   first pod whose signal fires; each pod has its own tuned params and its
+   own position slots (account-wide cap 6):
+   - **gapgo** — Gap-and-Go Confluence: PMH/ORB structure break plus a
+     confluence vote across VWAP, EMA 8/21, volume surge, RSI, Supertrend
+     (`lib/strategy.js`)
+   - **reclaim** — VWAP Reclaim: a real dip under VWAP, then a
+     volume-backed reclaim; stop under the dip low
+   - **flag** — First Pullback: a strong leg up, a shallow 1–3 bar flag,
+     entry on the break of the flag high
+   - **igniter** — Volume Igniter: three green candles plus a volume-surge
+     burst; stop under the run
+   - **redgreen** — Red-to-Green: the first volume-backed cross back above
+     the 9:30 open
+   RTH entries carry a broker-held protective stop; extended-hours entries
+   use marketable limit orders (Alpaca's off-RTH rules) with stops managed
+   by the engine off the live tape. At each pod's **planned exit**
+   (`targetR` x risk) the engine scales out `scaleOutPct` (default 85%) and
+   lets the runner ride a trailing stop floored at break-even. VWAP-loss,
+   trailing and time exits are engine-managed with the owning pod's params.
+   Everything is flattened at 19:55 — no overnights. Risk is capped per
+   trade (`riskPct` × the pod's nightly allocation weight), per position
+   (`maxNotionalPct`), and account-wide per day (3% halt).
 3. **Records every session** — 1-min bars for that day's universe land in
-   `state/days/` as backtest day files.
-4. **Improves itself nightly**: after the close it runs a walk-forward
-   random search (`lib/tune.js`) over all recorded days. New parameters are
-   accepted only when they beat the current ones on BOTH the training and
-   the held-out validation split, then written to `params.json` — which the
-   next morning's session picks up automatically.
+   `state/days/` as backtest day files, ONE shared library that all five
+   pods learn from.
+4. **Improves itself nightly, as an ensemble**: after the close every pod
+   runs a walk-forward random search (`lib/tune.js`) over the shared
+   recorded days, and each pod's search is cross-pollinated with the other
+   four champions' params — a stop/trail/scale-out setting proven by one
+   model seeds the others. New parameters are accepted only when they beat
+   the current ones on BOTH the training and the held-out validation split,
+   then persisted to `state/params/<pod>.json` (survives redeploys). The
+   validated scores then re-split the risk allocation (`state/alloc.json`,
+   weights 0.4–1.6): capital drifts toward what is working while losing
+   pods keep a floor so they can explore and recover.
 5. **Shows you the money in real time**: the trade loop serves a live
    dashboard (`lib/dashboard.js`) on `$PORT` (default 8788) — an equity
    line chart sampled every ~30s with entry/exit markers (▲ entry,

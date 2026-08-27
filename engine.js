@@ -1,13 +1,19 @@
 #!/usr/bin/env node
-/* Momentum Algo Trader — autonomous PAPER-trading engine driven by the
-   Momentum Scanner's discovery gates.
+/* Momentum Algo Trader — autonomous PAPER-trading ENSEMBLE driven by the
+   Momentum Scanner's discovery gates. Five strategy pods (Gap-and-Go,
+   VWAP Reclaim, First Pullback, Volume Igniter, Red-to-Green) trade the
+   same account side by side — each symbol is claimed by one pod, each pod
+   has its own tuned params and position slots. Nightly, all five re-tune
+   on the SAME shared library of recorded days, cross-pollinating champion
+   params, and the validated scores re-split the risk allocation between
+   them — five models teaching one book.
 
    Commands:
      node engine.js trade                live paper-trading loop (needs keys)
      node engine.js scan                 print the current scanner universe
-     node engine.js backtest [--synth N] backtest recorded days (or N synthetic)
-     node engine.js tune [--synth N] [--iters N]   improve params.json
-     node engine.js report               journal + tuning summary
+     node engine.js backtest [--synth N] backtest every pod on recorded days
+     node engine.js tune [--synth N] [--iters N]   run the ensemble tune now
+     node engine.js report               journal + per-pod + tuning summary
      node engine.js test                 run the unit tests
 
    Keys (Alpaca PAPER account) via env:
@@ -32,22 +38,83 @@ const path = require("path");
 const D = require("./lib/data");
 const { startDashboard } = require("./lib/dashboard");
 const { PaperBroker } = require("./lib/broker");
-const { DEFAULTS, prepSeries, signalAt, exitCheck } = require("./lib/strategy");
+const { prepSeries, exitCheck } = require("./lib/strategy");
+const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
 const { tune } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 
 const ROOT = __dirname;
-const PARAMS_FILE = path.join(ROOT, "params.json");
+const PARAMS_FILE = path.join(ROOT, "params.json"); /* legacy single-model file: seeds gapgo */
 const STATE = D.STATE;
 const JOURNAL = path.join(STATE, "journal.jsonl");
 const TUNE_LOG = path.join(STATE, "tune-log.jsonl");
+const ALLOC_FILE = path.join(STATE, "alloc.json");
+const PDIR = path.join(STATE, "params"); /* tuned pod params persist on the Render disk */
 
-const loadParams = () => {
-  try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(PARAMS_FILE, "utf8")) }; }
-  catch { return { ...DEFAULTS }; }
+const GLOBAL_MAX_POS = 6;   /* account-wide cap across all pods */
+const DAY_LOSS_PCT = 3;     /* account-wide daily halt */
+const FLATTEN_MIN = 1195;   /* 19:55 ET */
+
+/* per-pod params: DEFAULTS <- legacy params.json (gapgo only) <- tuned state */
+const loadStratParams = (st) => {
+  let P = { ...st.DEFAULTS };
+  if (st.key === "gapgo") {
+    try { P = { ...P, ...JSON.parse(fs.readFileSync(PARAMS_FILE, "utf8")), maxPositions: P.maxPositions }; } catch {}
+  }
+  try { P = { ...P, ...JSON.parse(fs.readFileSync(path.join(PDIR, st.key + ".json"), "utf8")) }; } catch {}
+  return P;
 };
-const saveParams = (P) => fs.writeFileSync(PARAMS_FILE, JSON.stringify(P, null, 2) + "\n");
+const loadAllParams = () => {
+  const out = {};
+  for (const st of STRATS) out[st.key] = loadStratParams(st);
+  return out;
+};
+const saveStratParams = (key, P) => {
+  fs.mkdirSync(PDIR, { recursive: true });
+  fs.writeFileSync(path.join(PDIR, key + ".json"), JSON.stringify(P, null, 2) + "\n");
+};
+const loadAlloc = () => {
+  try { return JSON.parse(fs.readFileSync(ALLOC_FILE, "utf8")); } catch { return {}; }
+};
+
+/* THE ENSEMBLE TUNE: every pod re-tunes on the SAME shared library of
+   recorded real days, and each pod's random search is cross-pollinated with
+   the other four champions' params — a management setting proven by one
+   model seeds the others. Afterwards the validated scores set each pod's
+   risk-allocation weight, so capital drifts toward what is working. */
+function ensembleTune(days, iters, seedBase) {
+  const champs = loadAllParams();
+  const scores = {};
+  for (const st of STRATS) {
+    const siblings = STRATS.filter((o) => o.key !== st.key).map((o) => champs[o.key]);
+    const res = tune(days, champs[st.key], iters, (seedBase + st.key.length * 7919) % 100000,
+      { ranges: st.RANGES, signalFn: st.signalAt, seeds: siblings });
+    const improved = res.bestScore.valid != null && res.baseScore.valid != null
+      ? res.bestScore.valid > res.baseScore.valid
+      : res.bestScore.train > res.baseScore.train;
+    if (improved) {
+      champs[st.key] = res.params;
+      saveStratParams(st.key, res.params);
+      fs.mkdirSync(STATE, { recursive: true });
+      fs.appendFileSync(TUNE_LOG, JSON.stringify({ t: new Date().toISOString(), strat: st.key, days: days.length, base: res.baseScore, best: res.bestScore, params: res.params }) + "\n");
+    }
+    scores[st.key] = res.bestScore.valid != null ? res.bestScore.valid : res.bestScore.train;
+    log(`tune ${st.key}: base ${JSON.stringify(res.baseScore)} best ${JSON.stringify(res.bestScore)}${improved ? "  → saved" : ""}`);
+  }
+  /* validated scores -> risk weights in [0.4, 1.6], mean ~1 — losers keep a
+     floor so they can still explore and recover */
+  const vals = Object.values(scores);
+  const min = Math.min(...vals);
+  const shifted = STRATS.map((st) => scores[st.key] - min + 1);
+  const mean = shifted.reduce((a, b) => a + b, 0) / shifted.length;
+  const alloc = {};
+  STRATS.forEach((st, i2) => { alloc[st.key] = +Math.min(1.6, Math.max(0.4, shifted[i2] / mean)).toFixed(2); });
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(ALLOC_FILE, JSON.stringify(alloc, null, 2) + "\n");
+  log("risk allocation:", JSON.stringify(alloc));
+  return { champs, scores, alloc };
+}
 const journal = (obj) => {
   fs.mkdirSync(STATE, { recursive: true });
   fs.appendFileSync(JOURNAL, JSON.stringify({ t: new Date().toISOString(), ...obj }) + "\n");
@@ -83,38 +150,34 @@ async function cmdScan() {
 }
 
 function cmdBacktest() {
-  const P = loadParams();
   const days = loadDaysOrSynth();
-  const { metrics } = runBacktest(days, P);
-  console.log("params:", JSON.stringify(P));
-  console.log("metrics:", JSON.stringify(metrics, null, 2));
+  const Ps = loadAllParams();
+  for (const st of STRATS) {
+    const { metrics } = runBacktest(days, Ps[st.key], 100000, st.signalAt);
+    console.log(`\n[${st.key}] ${st.name}`);
+    console.log("  metrics:", JSON.stringify(metrics));
+  }
 }
 
 function cmdTune() {
-  const P = loadParams();
   const days = loadDaysOrSynth();
-  const iters = arg("iters", 150);
-  log(`tuning: ${iters} iterations, walk-forward 70/30 over ${days.length} days…`);
-  const res = tune(days, P, iters, arg("seed", Date.now() % 100000));
-  console.log("score  base:", JSON.stringify(res.baseScore), " best:", JSON.stringify(res.bestScore));
-  const before = runBacktest(days, P).metrics;
-  const after = runBacktest(days, res.params).metrics;
-  console.log("full-set before:", JSON.stringify(before));
-  console.log("full-set after: ", JSON.stringify(after));
-  if (res.bestScore.valid > res.baseScore.valid || (res.baseScore.valid === null && res.bestScore.train > res.baseScore.train)) {
-    saveParams(res.params);
-    fs.mkdirSync(STATE, { recursive: true });
-    fs.appendFileSync(TUNE_LOG, JSON.stringify({ t: new Date().toISOString(), days: days.length, base: res.baseScore, best: res.bestScore, params: res.params }) + "\n");
-    log("improved -> params.json updated");
-  } else log("no validated improvement — params.json unchanged");
+  const iters = arg("iters", 120);
+  log(`ensemble tune: ${STRATS.length} pods × ${iters} iterations, walk-forward 70/30 over ${days.length} days…`);
+  ensembleTune(days, iters, arg("seed", Date.now() % 100000));
 }
 
 function cmdReport() {
   let trades = [];
-  try { trades = fs.readFileSync(JOURNAL, "utf8").trim().split("\n").map(JSON.parse).filter((j) => j.kind === "exit"); } catch {}
+  try { trades = fs.readFileSync(JOURNAL, "utf8").trim().split("\n").map(JSON.parse).filter((j) => j.kind === "exit" || j.kind === "scale"); } catch {}
   const pnl = trades.reduce((a, t) => a + (t.pnl || 0), 0);
   const wins = trades.filter((t) => t.pnl > 0).length;
   console.log(`journal: ${trades.length} closed trades, ${wins} wins (${trades.length ? Math.round((wins / trades.length) * 100) : 0}%), net PnL $${pnl.toFixed(2)}`);
+  for (const st of STRATS) {
+    const tt = trades.filter((t) => t.strat === st.key);
+    const p2 = tt.reduce((a, t) => a + (t.pnl || 0), 0);
+    console.log(`  ${st.key.padEnd(9)} ${String(tt.length).padStart(4)} trades  $${p2.toFixed(2)}`);
+  }
+  console.log("allocation:", JSON.stringify(loadAlloc()));
   try {
     const tl = fs.readFileSync(TUNE_LOG, "utf8").trim().split("\n").map(JSON.parse);
     console.log(`tuning: ${tl.length} accepted improvement(s); latest validate score ${tl[tl.length - 1].best.valid}`);
@@ -163,11 +226,12 @@ async function cmdTrade() {
   };
   sampleEquity(acct.equity);
 
-  let P = loadParams();
+  let Ps = loadAllParams();        // strat key -> params
+  let alloc = loadAlloc();         // strat key -> risk weight (nightly ensemble)
   let universe = [];               // [{symbol, pct, prevClose}]
   let lastDiscover = 0;
-  const posMeta = {};              // sym -> {entry, stop, risk, hwm, barsHeld, qty}
-  const entriesToday = {};
+  const posMeta = {};              // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty}
+  const entriesToday = {};         // "strat:sym" -> count
   const cooldownUntil = {};
   let dayStartEq = Number(acct.equity);
   let halted = false;
@@ -187,16 +251,19 @@ async function cmdTrade() {
         day = today; halted = false; recorded = false;
         for (const k of Object.keys(entriesToday)) delete entriesToday[k];
         for (const k of Object.keys(cooldownUntil)) delete cooldownUntil[k];
-        P = loadParams();
+        Ps = loadAllParams();
+        alloc = loadAlloc();
         const a = await broker.account().catch(() => null);
         if (a) dayStartEq = Number(a.equity);
-        journal({ kind: "day", day, params: P });
+        journal({ kind: "day", day, alloc });
       }
       const inSession = nowMin >= 240 && nowMin < 1200; /* full extended tape 4:00-20:00 */
       const ext = nowMin < 570 || nowMin >= 960; /* Alpaca ext-hours order rules apply */
-      dashStatus.session = !inSession ? "closed" : nowMin >= P.flattenMin ? "flatten" : nowMin < 570 ? "premarket" : nowMin >= 960 ? "after-hours" : "regular";
+      dashStatus.session = !inSession ? "closed" : nowMin >= FLATTEN_MIN ? "flatten" : nowMin < 570 ? "premarket" : nowMin >= 960 ? "after-hours" : "regular";
       if (!inSession) {
-        /* after the extended close: record + tune exactly once */
+        /* after the extended close: record the day once, then run the
+           ENSEMBLE tune — all five pods learn from the same shared library,
+           cross-pollinate params, and re-split the risk allocation */
         if (nowMin >= 1205 && nowMin < 1435 && !recorded) {
           recorded = true;
           const syms = [...new Set([...universe.map((u) => u.symbol), ...Object.keys(posMeta)])];
@@ -207,14 +274,11 @@ async function cmdTrade() {
           }
           const days = D.loadRecordedDays();
           if (days.length >= 5) {
-            log(`nightly tune over ${days.length} recorded days…`);
-            const res = tune(days, P, 200, Date.now() % 100000);
-            if (res.bestScore.valid > res.baseScore.valid) {
-              saveParams(res.params);
-              fs.appendFileSync(TUNE_LOG, JSON.stringify({ t: new Date().toISOString(), days: days.length, base: res.baseScore, best: res.bestScore, params: res.params }) + "\n");
-              log("nightly tune improved params.json");
-              journal({ kind: "tune", base: res.baseScore, best: res.bestScore });
-            } else log("nightly tune: no validated improvement");
+            log(`nightly ENSEMBLE tune: ${STRATS.length} pods over ${days.length} recorded days…`);
+            const res = ensembleTune(days, 120, Date.now() % 100000);
+            Ps = res.champs;
+            alloc = res.alloc;
+            journal({ kind: "tune", scores: res.scores, alloc: res.alloc });
           } else log(`nightly tune skipped — only ${days.length} recorded day(s), need 5`);
         }
         await sleep(60000);
@@ -239,15 +303,15 @@ async function cmdTrade() {
           try {
             if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, px * 0.99));
             else await broker.sellMarket(p.symbol, q);
-            journal({ kind: "exit", sym: p.symbol, reason, pnl: Number(p.unrealized_pl) });
+            journal({ kind: "exit", sym: p.symbol, strat: (posMeta[p.symbol] || {}).strat, reason, pnl: Number(p.unrealized_pl) });
           } catch (e) { log("flatten sell:", p.symbol, e.message); }
-          cooldownUntil[p.symbol] = nowMin + P.cooldownMin;
+          cooldownUntil[p.symbol] = nowMin + 10;
           delete posMeta[p.symbol];
         }
       };
 
       /* 19:55+: flatten and stand down for the day */
-      if (nowMin >= P.flattenMin) {
+      if (nowMin >= FLATTEN_MIN) {
         const positions = await broker.positions().catch(() => []);
         if (positions.length) {
           log("flatten window — closing all positions");
@@ -264,31 +328,39 @@ async function cmdTrade() {
       const held = new Set(positions.map((p) => p.symbol));
       dashStatus.positions = positions.map((p) => {
         const m = posMeta[p.symbol];
+        const mp = m && Ps[m.strat] ? Ps[m.strat] : Ps.gapgo;
         return {
-          sym: p.symbol, qty: Math.abs(Number(p.qty)),
+          sym: p.symbol, strat: m ? m.strat : null, qty: Math.abs(Number(p.qty)),
           entry: Number(p.avg_entry_price),
           price: Number(p.current_price) || Number(p.avg_entry_price),
           target: m && !m.scaled ? m.target : null,
           stop: m ? m.stop : null,
-          scaled: !!(m && m.scaled), scaleOutPct: P.scaleOutPct,
+          scaled: !!(m && m.scaled), scaleOutPct: mp.scaleOutPct,
           value: Number(p.market_value),
           plUsd: Number(p.unrealized_pl), plPct: Number(p.unrealized_plpc) * 100,
         };
       });
+      const openByStrat = {};
+      for (const m of Object.values(posMeta)) if (m.strat) openByStrat[m.strat] = (openByStrat[m.strat] || 0) + 1;
+      dashStatus.strats = STRATS.map((st) => ({
+        key: st.key, name: st.name,
+        weight: alloc[st.key] != null ? alloc[st.key] : 1,
+        open: openByStrat[st.key] || 0,
+      }));
       for (const k of Object.keys(posMeta)) {
         if (!held.has(k)) { // broker closed it (stop/target hit server-side)
-          journal({ kind: "exit", sym: k, reason: "bracket" });
-          cooldownUntil[k] = nowMin + P.cooldownMin;
+          journal({ kind: "exit", sym: k, strat: posMeta[k].strat, reason: "bracket" });
+          cooldownUntil[k] = nowMin + 10;
           delete posMeta[k];
         }
       }
 
-      /* daily loss halt */
+      /* account-wide daily loss halt */
       const a = await broker.account().catch(() => null);
       if (a) sampleEquity(a.equity);
-      if (a && !halted && Number(a.equity) <= dayStartEq * (1 - P.maxDailyLossPct / 100)) {
+      if (a && !halted && Number(a.equity) <= dayStartEq * (1 - DAY_LOSS_PCT / 100)) {
         halted = true;
-        log(`daily loss limit hit (${P.maxDailyLossPct}%) — flattening, no more entries today`);
+        log(`daily loss limit hit (${DAY_LOSS_PCT}%) — flattening, no more entries today`);
         await flattenAll(positions, "dayhalt");
         journal({ kind: "dayhalt", equity: a.equity });
         await sleep(60000);
@@ -305,19 +377,22 @@ async function cmdTrade() {
           const bars = barsMap[p.symbol] || [];
           if (bars.length < 5) continue;
           const qtyNow = Math.abs(Number(p.qty));
+          const P0 = Ps.gapgo; /* adoption defaults for positions with no meta (restart) */
           const meta = posMeta[p.symbol] || (posMeta[p.symbol] = {
-            entry: Number(p.avg_entry_price), stop: Number(p.avg_entry_price) * (1 - P.maxStopPct / 100),
-            brokerStop: null, risk: Number(p.avg_entry_price) * P.minStopPct / 100,
-            target: Number(p.avg_entry_price) * (1 + P.targetR * P.minStopPct / 100),
+            strat: "gapgo",
+            entry: Number(p.avg_entry_price), stop: Number(p.avg_entry_price) * (1 - P0.maxStopPct / 100),
+            brokerStop: null, risk: Number(p.avg_entry_price) * P0.minStopPct / 100,
+            target: Number(p.avg_entry_price) * (1 + P0.targetR * P0.minStopPct / 100),
             hwm: Number(p.avg_entry_price), barsHeld: 0, qty: qtyNow, scaled: false,
           });
+          const P = Ps[meta.strat] || Ps.gapgo; /* this pod's own management rules */
           meta.qty = qtyNow;
           const price = bars[bars.length - 1].c;
           const sellSome = async (q, kind, reason) => {
             await broker.cancelOrders(p.symbol).catch(() => {});
             if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, price * 0.995));
             else await broker.sellMarket(p.symbol, q);
-            journal({ kind, sym: p.symbol, reason, qty: q, pnl: +(((price - meta.entry) * q).toFixed(2)) });
+            journal({ kind, sym: p.symbol, strat: meta.strat, reason, qty: q, pnl: +(((price - meta.entry) * q).toFixed(2)) });
           };
           /* PLANNED EXIT: bank scaleOutPct at the target; the runner rides
              the trail with its stop floored at break-even */
@@ -350,32 +425,42 @@ async function cmdTrade() {
             delete posMeta[p.symbol];
           } catch (e) { log("sell failed:", p.symbol, e.message); }
         }
-        /* entries */
-        if (!halted && nowMin >= P.entryStartMin && nowMin <= P.entryEndMin && held.size < P.maxPositions) {
+        /* entries: each symbol is offered to every pod in turn; the first
+           pod whose signal fires CLAIMS it (one owner per symbol), subject
+           to that pod's own position/re-entry caps and the account cap */
+        if (!halted && Object.keys(posMeta).length < GLOBAL_MAX_POS) {
+          entryScan:
           for (const u of universe) {
             if (held.has(u.symbol) || posMeta[u.symbol]) continue;
-            if ((entriesToday[u.symbol] || 0) >= P.reentryLimit) continue;
             if (cooldownUntil[u.symbol] != null && nowMin < cooldownUntil[u.symbol]) continue;
             const bars = barsMap[u.symbol] || [];
             if (bars.length < 30) continue;
-            const S = prepSeries(bars, P);
-            const sig = signalAt(S, bars, bars.length - 1, P);
-            if (!sig) continue;
-            const px = bars[bars.length - 1].c;
-            const eq = a ? Number(a.equity) : dayStartEq;
-            let qty = Math.floor((eq * P.riskPct / 100) / sig.risk);
-            qty = Math.min(qty, Math.floor((eq * P.maxNotionalPct / 100) / px));
-            if (qty < 1) continue;
-            const target = P.targetR > 0 ? px + P.targetR * sig.risk : null;
-            log(`ENTRY${ext ? " (ext)" : ""} ${u.symbol} x${qty} @~${px.toFixed(2)} stop ${sig.stop.toFixed(2)}${target ? " target " + target.toFixed(2) : ""}`);
-            try {
-              if (ext) await broker.buyLimitExt(u.symbol, qty, px * 1.01); /* marketable limit; stop engine-managed off-RTH */
-              else await broker.buyBracket(u.symbol, qty, sig.stop, null); /* OTO stop; the scale-out is engine-managed */
-              posMeta[u.symbol] = { entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false };
-              entriesToday[u.symbol] = (entriesToday[u.symbol] || 0) + 1;
-              journal({ kind: "entry", sym: u.symbol, qty, px, stop: sig.stop, target });
-              if (Object.keys(posMeta).length >= P.maxPositions) break;
-            } catch (e) { log("order rejected:", e.message); }
+            for (const st of STRATS) {
+              const P = Ps[st.key];
+              if ((openByStrat[st.key] || 0) >= P.maxPositions) continue;
+              if ((entriesToday[st.key + ":" + u.symbol] || 0) >= P.reentryLimit) continue;
+              const S = prepSeries(bars, P);
+              const sig = st.signalAt(S, bars, bars.length - 1, P);
+              if (!sig) continue;
+              const px = bars[bars.length - 1].c;
+              const eq = a ? Number(a.equity) : dayStartEq;
+              const w = alloc[st.key] != null ? alloc[st.key] : 1; /* nightly risk weight */
+              let qty = Math.floor((eq * (P.riskPct * w) / 100) / sig.risk);
+              qty = Math.min(qty, Math.floor((eq * P.maxNotionalPct / 100) / px));
+              if (qty < 1) continue;
+              const target = P.targetR > 0 ? px + P.targetR * sig.risk : null;
+              log(`ENTRY [${st.key}]${ext ? " (ext)" : ""} ${u.symbol} x${qty} @~${px.toFixed(2)} stop ${sig.stop.toFixed(2)}${target ? " target " + target.toFixed(2) : ""}`);
+              try {
+                if (ext) await broker.buyLimitExt(u.symbol, qty, px * 1.01); /* marketable limit; stop engine-managed off-RTH */
+                else await broker.buyBracket(u.symbol, qty, sig.stop, null); /* OTO stop; the scale-out is engine-managed */
+                posMeta[u.symbol] = { strat: st.key, entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false };
+                entriesToday[st.key + ":" + u.symbol] = (entriesToday[st.key + ":" + u.symbol] || 0) + 1;
+                openByStrat[st.key] = (openByStrat[st.key] || 0) + 1;
+                journal({ kind: "entry", sym: u.symbol, strat: st.key, qty, px, stop: sig.stop, target });
+                if (Object.keys(posMeta).length >= GLOBAL_MAX_POS) break entryScan;
+              } catch (e) { log("order rejected:", e.message); }
+              continue entryScan; /* symbol claimed (or rejected) — next symbol */
+            }
           }
         }
       }

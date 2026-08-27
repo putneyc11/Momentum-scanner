@@ -135,6 +135,77 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(b.metrics.trades > 0, `tuned strategy still trades (${b.metrics.trades} trades over ${days.length} synthetic days)`);
 }
 
+/* ---- the five-pod ensemble ---- */
+{
+  const { STRATS } = require("./lib/strategies");
+  ok(STRATS.length === 5 && new Set(STRATS.map((s) => s.key)).size === 5, "five strategy pods registered with unique keys");
+  const mgmtKeys = ["targetR", "scaleOutPct", "maxPositions", "riskPct", "stopAtrMult", "flattenMin", "reentryLimit", "cooldownMin"];
+  ok(STRATS.every((st) => typeof st.signalAt === "function" && mgmtKeys.every((k) => st.DEFAULTS[k] != null)), "every pod carries a full management param set for the shared exit engine");
+  const get = (key) => STRATS.find((s) => s.key === key);
+
+  /* VWAP Reclaim: a real dip under VWAP, then a volume-backed reclaim */
+  {
+    const st = get("reclaim"); const P = st.DEFAULTS;
+    const bars = [];
+    for (let m = 600; m < 630; m++) bars.push(bar(m, 2, 2.01, 1.99, 2.0 + ((m % 2) ? -0.004 : 0.004), 30000));
+    for (let m = 630; m < 633; m++) bars.push(bar(m, 1.9, 1.91, 1.89, 1.9, 30000));
+    bars.push(bar(633, 1.92, 2.06, 1.91, 2.05, 200000));
+    ok(!!st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P), "reclaim: dip under VWAP + volume reclaim fires an entry");
+    const quiet = bars.slice(0, -1); quiet.push(bar(633, 1.92, 2.06, 1.91, 2.05, 30000));
+    ok(st.signalAt(prepSeries(quiet, P), quiet, quiet.length - 1, P) === null, "reclaim: the same cross WITHOUT volume stays flat");
+  }
+  /* First Pullback: leg up, shallow 2-bar flag, entry breaks the flag high */
+  {
+    const st = get("flag"); const P = st.DEFAULTS;
+    const bars = [];
+    for (let m = 600; m < 615; m++) bars.push(bar(m, 2, 2.01, 1.99, 2.0 + ((m % 2) ? -0.004 : 0.004), 30000));
+    for (let k = 0; k < 10; k++) { const c = 2.0 + (k + 1) * 0.03; bars.push(bar(615 + k, c - 0.03, c + 0.01, c - 0.04, c, 60000)); }
+    bars.push(bar(625, 2.28, 2.28, 2.18, 2.2, 25000));
+    bars.push(bar(626, 2.2, 2.24, 2.17, 2.22, 25000));
+    const noBreak = prepSeries(bars, P);
+    ok(st.signalAt(noBreak, bars, bars.length - 1, P) === null, "flag: no entry while still inside the pullback");
+    bars.push(bar(627, 2.23, 2.32, 2.22, 2.3, 80000));
+    ok(!!st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P), "flag: break of the pullback high after a strong leg fires an entry");
+  }
+  /* Volume Igniter: three green candles + a surge bar */
+  {
+    const st = get("igniter"); const P = st.DEFAULTS;
+    const bars = [];
+    for (let m = 600; m < 615; m++) bars.push(bar(m, 2, 2.01, 1.99, 2.0 + ((m % 2) ? -0.005 : 0.005), 30000));
+    bars.push(bar(615, 2.0, 2.03, 1.99, 2.02, 35000));
+    bars.push(bar(616, 2.02, 2.05, 2.01, 2.04, 40000));
+    bars.push(bar(617, 2.04, 2.08, 2.03, 2.07, 150000));
+    ok(!!st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P), "igniter: 3 green candles + volume surge fires an entry");
+    const red = bars.slice(0, -1); red.push(bar(617, 2.04, 2.05, 2.0, 2.01, 150000));
+    ok(st.signalAt(prepSeries(red, P), red, red.length - 1, P) === null, "igniter: a red surge bar does NOT fire");
+  }
+  /* Red-to-Green: first cross back above the 9:30 open */
+  {
+    const st = get("redgreen"); const P = st.DEFAULTS;
+    const bars = [bar(570, 2.0, 2.01, 1.96, 1.97, 50000)];
+    for (let m = 571; m < 587; m++) bars.push(bar(m, 1.95, 1.96, 1.94, 1.95 + ((m % 2) ? -0.004 : 0.004), 30000));
+    const below = prepSeries(bars, P);
+    ok(st.signalAt(below, bars, bars.length - 1, P) === null, "red-to-green: no entry while still red on the day");
+    bars.push(bar(587, 1.96, 2.06, 1.95, 2.05, 200000));
+    ok(!!st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P), "red-to-green: the volume-backed cross above the open fires an entry");
+  }
+  /* every pod runs the shared backtester, and the tuner accepts a pod +
+     sibling seeds (the nightly cross-pollination path) */
+  const days10 = makeLibrary(12, 21);
+  for (const st of STRATS) {
+    const m = runBacktest(days10, st.DEFAULTS, 100000, st.signalAt).metrics;
+    ok(Number.isFinite(m.netPct) && m.trades >= 0, `${st.key}: pod backtests cleanly through the shared engine (${m.trades} trades)`);
+  }
+  const st2 = get("reclaim");
+  const seeds = STRATS.filter((s) => s.key !== "reclaim").map((s) => s.DEFAULTS);
+  const res2 = tune(days10, st2.DEFAULTS, 25, 9, { ranges: st2.RANGES, signalFn: st2.signalAt, seeds });
+  ok(res2.bestScore.train >= res2.baseScore.train, "pod tuner with sibling cross-pollination never regresses train");
+  let inRange = true;
+  for (const [k, [lo, hi]] of Object.entries(st2.RANGES))
+    if (!(res2.params[k] >= lo - 1e-9 && res2.params[k] <= hi + 1e-9)) inRange = false;
+  ok(inRange, "cross-pollinated params stay inside the pod's declared ranges");
+}
+
 /* ---- broker safety rail ---- */
 {
   let threw = false;
@@ -161,12 +232,13 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
       .map((o) => JSON.stringify(o)).join("\n") + "\n");
   const listen = (srv) => new Promise((r) => srv.on("listening", () => r(srv.address().port)));
   const srv = startDashboard({ port: 0, stateDir: dir, status: { session: "regular", universe: 5, positions: [
-    { sym: "GAPPY", qty: 100, entry: 4.5, price: 4.8, target: 5.2, stop: 4.2, scaleOutPct: 85, value: 480, plUsd: 30, plPct: 6.7 },
-  ] } });
+    { sym: "GAPPY", strat: "gapgo", qty: 100, entry: 4.5, price: 4.8, target: 5.2, stop: 4.2, scaleOutPct: 85, value: 480, plUsd: 30, plPct: 6.7 },
+  ], strats: [{ key: "gapgo", name: "Gap-and-Go", weight: 1.2, open: 1 }] } });
   const port = await listen(srv);
   const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
   ok(html.includes("Account value") && html.includes("<canvas"), "dashboard serves the equity chart page");
   ok(html.includes("Active trades") && html.includes("Planned exit") && html.includes("Stop loss"), "active-trades table ships with entry/planned-exit/stop columns");
+  ok(html.includes("Models") && html.includes("Risk weight"), "models card shows the ensemble's risk weights");
   const st = await (await fetch(`http://127.0.0.1:${port}/api/state`)).json();
   ok(st.equity.length === 3 && st.equity[2].eq === 100100, "equity samples stream through /api/state");
   ok(st.trades.length === 2 && st.trades[1].pnl === 75, "trade events (entry/exit only) reach the chart");
