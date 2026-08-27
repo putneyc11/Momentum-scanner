@@ -2,7 +2,7 @@
    Every mechanical guarantee the strategy relies on has a named assertion. */
 
 const I = require("./lib/indicators");
-const { DEFAULTS, RANGES, prepSeries, signalAt, exitCheck } = require("./lib/strategy");
+const { DEFAULTS, RANGES, prepSeries, signalAt, exitCheck, entryViable } = require("./lib/strategy");
 const { runBacktest, runDay } = require("./lib/backtest");
 const { tune, score } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
@@ -231,6 +231,13 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   for (const [k, [lo, hi]] of Object.entries(st2.RANGES))
     if (!(res2.params[k] >= lo - 1e-9 && res2.params[k] <= hi + 1e-9)) inRange = false;
   ok(inRange, "cross-pollinated params stay inside the pod's declared ranges");
+}
+
+/* ---- churn guard: an entry the exit engine would instantly close ---- */
+{
+  ok(entryViable({ vwap: [2.5] }, [{ c: 2.6 }], 0, { vwapExit: 1 }), "entry above VWAP is viable with vwapExit armed");
+  ok(!entryViable({ vwap: [2.5] }, [{ c: 2.4 }], 0, { vwapExit: 1 }), "below-VWAP entry with vwapExit armed is REJECTED (was the gapgo enter/exit churn)");
+  ok(entryViable({ vwap: [2.5] }, [{ c: 2.4 }], 0, { vwapExit: 0 }), "riders (vwapExit off) may still enter below VWAP");
 }
 
 /* ---- fast-lane discovery + missed-mover audit ---- */

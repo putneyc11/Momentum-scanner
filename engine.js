@@ -38,7 +38,7 @@ const path = require("path");
 const D = require("./lib/data");
 const { startDashboard } = require("./lib/dashboard");
 const { PaperBroker } = require("./lib/broker");
-const { prepSeries, exitCheck } = require("./lib/strategy");
+const { prepSeries, exitCheck, entryViable } = require("./lib/strategy");
 const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
 const { tune } = require("./lib/tune");
@@ -246,7 +246,7 @@ async function cmdTrade() {
   let fastBusy = false;
   const fastTick = async () => {
     if (fastBusy || !running || halted) return;
-    const syms = Object.keys(posMeta).filter((s) => !selling.has(s) && posMeta[s].qty > 0);
+    const syms = Object.keys(posMeta).filter((s) => !selling.has(s) && posMeta[s].qty > 0 && posMeta[s].filled && !posMeta[s].exiting);
     if (!syms.length) return;
     const nowMin2 = D.etMinute(Date.now());
     if (nowMin2 < 240 || nowMin2 >= FLATTEN_MIN) return; /* the slow loop owns the flatten window */
@@ -275,9 +275,9 @@ async function cmdTrade() {
             await broker.cancelOrders(sym).catch(() => {});
             if (ext2) await broker.sellLimitExt(sym, meta.qty, Math.max(0.01, p * 0.995));
             else await broker.sellMarket(sym, meta.qty);
-            journal({ kind: "exit", sym, strat: meta.strat, reason: "stop", qty: meta.qty, pnl: +(((p - meta.entry) * meta.qty).toFixed(2)) });
-            cooldownUntil[sym] = nowMin2 + P.cooldownMin;
-            delete posMeta[sym];
+            /* stateful exit: the slow loop journals + frees the slot only
+               when the broker confirms the position is gone */
+            meta.exiting = { reason: "stop", t: Date.now(), tries: 0, pnl: +(((p - meta.entry) * meta.qty).toFixed(2)) };
           } catch (e) { log("fast exit failed:", sym, e.message); }
           selling.delete(sym);
         } else if (!meta.scaled && meta.target && p >= meta.target && P.scaleOutPct < 100) {
@@ -447,6 +447,7 @@ async function cmdTrade() {
           target: m && !m.scaled ? m.target : null,
           stop: m ? m.stop : null,
           ridePct: mp.hwmTrailPct > 0 ? mp.hwmTrailPct : null, /* riders: exit = dip this % off the high */
+          exiting: !!(m && m.exiting), /* a sell is working; waiting on the fill */
           scaled: !!(m && m.scaled), scaleOutPct: mp.scaleOutPct,
           value: Number(p.market_value),
           plUsd: Number(p.unrealized_pl), plPct: Number(p.unrealized_plpc) * 100,
@@ -459,9 +460,25 @@ async function cmdTrade() {
         weight: alloc[st.key] != null ? alloc[st.key] : 1,
         open: openByStrat[st.key] || 0,
       }));
+      /* AN EXIT IS DONE ONLY WHEN THE BROKER SAYS THE POSITION IS GONE.
+         Submitting a sell no longer journals or frees the slot — that
+         caused unfilled ext-hours sells to be re-adopted, re-exited and
+         re-journaled every loop (the $0 vwap-exit spam). */
       for (const k of Object.keys(posMeta)) {
-        if (!held.has(k)) { // broker closed it (stop/target hit server-side)
-          journal({ kind: "exit", sym: k, strat: posMeta[k].strat, reason: "bracket" });
+        const m = posMeta[k];
+        if (held.has(k)) { m.filled = true; continue; }
+        if (m.exiting) { /* the working sell finally filled */
+          journal({ kind: "exit", sym: k, strat: m.strat, reason: m.exiting.reason, qty: m.qty, pnl: m.exiting.pnl });
+          cooldownUntil[k] = nowMin + (Ps[m.strat] || Ps.gapgo).cooldownMin;
+          delete posMeta[k];
+        } else if (!m.filled) { /* entry order never filled — quietly withdraw */
+          if (Date.now() - (m.placedAt || 0) > 90000) {
+            log(`entry never filled ${k} — canceling the order, freeing the slot`);
+            await broker.cancelOrders(k).catch(() => {});
+            delete posMeta[k];
+          }
+        } else { /* broker-held stop/close filled server-side */
+          journal({ kind: "exit", sym: k, strat: m.strat, reason: "bracket" });
           cooldownUntil[k] = nowMin + 10;
           delete posMeta[k];
         }
@@ -517,14 +534,30 @@ async function cmdTrade() {
             brokerStop: null, risk: Number(p.avg_entry_price) * P0.minStopPct / 100,
             target: Number(p.avg_entry_price) * (1 + P0.targetR * P0.minStopPct / 100),
             hwm: Number(p.avg_entry_price), barsHeld: 0, qty: qtyNow, scaled: false,
+            filled: true, placedAt: Date.now(), exiting: null,
           });
           const P = Ps[meta.strat] || Ps.gapgo; /* this pod's own management rules */
           meta.qty = qtyNow;
+          meta.filled = true;
           const price = bars[bars.length - 1].c;
-          const sellSome = async (q, kind, reason) => {
+          const submitSell = async (q, px2) => {
             await broker.cancelOrders(p.symbol).catch(() => {});
-            if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, price * 0.995));
+            if (ext) await broker.sellLimitExt(p.symbol, q, Math.max(0.01, px2));
             else await broker.sellMarket(p.symbol, q);
+          };
+          /* a full exit already working: re-price it harder every 45s until
+             the broker confirms the fill — never journal twice */
+          if (meta.exiting) {
+            if (Date.now() - meta.exiting.t > 45000) {
+              meta.exiting.t = Date.now();
+              meta.exiting.tries++;
+              log(`exit still working [${meta.strat}] ${p.symbol} (${meta.exiting.reason}) — repricing, attempt ${meta.exiting.tries + 1}`);
+              try { await submitSell(qtyNow, price * (0.995 - 0.03 * Math.min(meta.exiting.tries, 10))); } catch (e) { log("reprice failed:", p.symbol, e.message); }
+            }
+            continue;
+          }
+          const sellSome = async (q, kind, reason) => {
+            await submitSell(q, price * 0.995);
             journal({ kind, sym: p.symbol, strat: meta.strat, reason, qty: q, pnl: +(((price - meta.entry) * q).toFixed(2)) });
           };
           /* PLANNED EXIT: bank scaleOutPct at the target; the runner rides
@@ -553,9 +586,8 @@ async function cmdTrade() {
           if (ex.reason === "stop" && !ext && meta.brokerStop != null && meta.stop <= meta.brokerStop + 1e-9) continue;
           log(`exit ${p.symbol}: ${ex.reason}${ext ? " (ext)" : ""}`);
           try {
-            await sellSome(meta.qty || qtyNow, "exit", ex.reason);
-            cooldownUntil[p.symbol] = nowMin + P.cooldownMin;
-            delete posMeta[p.symbol];
+            await submitSell(meta.qty || qtyNow, price * 0.995);
+            meta.exiting = { reason: ex.reason, t: Date.now(), tries: 0, pnl: +(((price - meta.entry) * (meta.qty || qtyNow)).toFixed(2)) };
           } catch (e) { log("sell failed:", p.symbol, e.message); }
         }
         /* entries: each symbol is offered to every pod in turn; the first
@@ -573,6 +605,7 @@ async function cmdTrade() {
               if ((openByStrat[st.key] || 0) >= P.maxPositions) continue;
               if ((entriesToday[st.key + ":" + u.symbol] || 0) >= P.reentryLimit) continue;
               const S = prepSeries(bars, P);
+              if (!entryViable(S, bars, bars.length - 1, P)) continue; /* churn guard: never buy what the exit engine would instantly sell */
               const sig = st.signalAt(S, bars, bars.length - 1, P);
               if (!sig) continue;
               const px = bars[bars.length - 1].c;
@@ -586,7 +619,7 @@ async function cmdTrade() {
               try {
                 if (ext) await broker.buyLimitExt(u.symbol, qty, px * 1.01); /* marketable limit; stop engine-managed off-RTH */
                 else await broker.buyBracket(u.symbol, qty, sig.stop, null); /* OTO stop; the scale-out is engine-managed */
-                posMeta[u.symbol] = { strat: st.key, entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false };
+                posMeta[u.symbol] = { strat: st.key, entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false, filled: false, placedAt: Date.now(), exiting: null };
                 entriesToday[st.key + ":" + u.symbol] = (entriesToday[st.key + ":" + u.symbol] || 0) + 1;
                 openByStrat[st.key] = (openByStrat[st.key] || 0) + 1;
                 journal({ kind: "entry", sym: u.symbol, strat: st.key, qty, px, stop: sig.stop, target });
