@@ -595,6 +595,42 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     ok(threw, "an invalid base ref throws instead of reporting a pass");
   }
 
+  /* ---- the trader does not tune itself ---- */
+  {
+    const fsx = require("fs"), pathx = require("path");
+    const src = fsx.readFileSync(pathx.join(__dirname, "engine.js"), "utf8");
+
+    /* The live loop must never promote a tuned champion on its own. This is a
+       source assertion rather than a behavioural one because the thing being
+       prevented is a code path returning, not a value being wrong. */
+    const loopStart = src.indexOf("async function cmdTrade");
+    const loop = loopStart > -1 ? src.slice(loopStart) : "";
+    ok(loop.length > 0, "cmdTrade is findable for the self-tune assertions");
+    ok(!/ensembleTune\s*\(/.test(loop), "the live trade loop never calls ensembleTune");
+    ok(!/\bPs\s*=\s*res\.champs/.test(src), "nothing assigns tuned champions into live params");
+    ok(!/\balloc\s*=\s*res\.alloc/.test(src), "nothing assigns tuned weights into live allocation");
+
+    /* Tuning still exists as a deliberate command -- removing self-tuning must
+       not remove the ability to tune. */
+    ok(/function cmdTune/.test(src) && /tune:\s*cmdTune/.test(src),
+      "engine.js tune is still available as an explicit command");
+
+    /* Production reads git; tuning writes local. If these ever point at the
+       same place, an agent's overnight search reaches the account by itself. */
+    ok(/const PDIR_READ = path\.join\(__dirname, "params"\)/.test(src),
+      "production reads params from the git-tracked params/ directory");
+    ok(/const PDIR_WRITE = path\.join\(STATE, "params"\)/.test(src),
+      "tuning writes params to the gitignored state/ directory");
+    ok(/readFileSync\(path\.join\(PDIR_READ,/.test(src) && !/readFileSync\(path\.join\(PDIR_WRITE,/.test(src),
+      "params are only ever READ from the reviewed directory");
+    ok(/writeFileSync\(path\.join\(PDIR_WRITE,/.test(src) && !/writeFileSync\(path\.join\(PDIR_READ,/.test(src),
+      "params are only ever WRITTEN to the unreviewed directory");
+
+    /* Day recording is what grows the library every agent depends on. Removing
+       the nightly tune must not take it with it. */
+    ok(/D\.recordDay\(/.test(loop), "the live loop still records each day to the library");
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

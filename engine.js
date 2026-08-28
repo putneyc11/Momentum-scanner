@@ -51,8 +51,20 @@ const ROOT = __dirname;
 const STATE = D.STATE;
 const JOURNAL = path.join(STATE, "journal.jsonl");
 const TUNE_LOG = path.join(STATE, "tune-log.jsonl");
-const ALLOC_FILE = path.join(STATE, "alloc.json");
-const PDIR = path.join(STATE, "params"); /* tuned pod params persist on the Render disk */
+/* Two directories on purpose, and the split is the whole point.
+
+   PDIR_READ is what the live trader trades. It is in git, so a champion only
+   reaches production by being committed and merged like any other change --
+   reviewed, with a regress table, by a human.
+
+   PDIR_WRITE is where `engine.js tune` puts what it finds. It is on the local
+   disk and gitignored, so an agent can tune all night without any of it
+   touching what trades. Promotion is a deliberate copy from one to the other,
+   which is a thing a person does on purpose and cannot do by accident. */
+const PDIR_READ = path.join(__dirname, "params");
+const PDIR_WRITE = path.join(STATE, "params");
+const ALLOC_FILE = path.join(PDIR_READ, "alloc.json");   /* production reads git, never a nightly write */
+const ALLOC_WRITE = path.join(STATE, "alloc.json");
 
 const GLOBAL_MAX_POS = 8;   /* account-wide cap across all pods */
 const DAY_LOSS_PCT = 3;     /* account-wide daily halt */
@@ -61,7 +73,7 @@ const FLATTEN_MIN = 1195;   /* 19:55 ET */
 /* per-pod params: DEFAULTS <- tuned state (persisted on the Render disk) */
 const loadStratParams = (st) => {
   let P = { ...st.DEFAULTS };
-  try { P = { ...P, ...JSON.parse(fs.readFileSync(path.join(PDIR, st.key + ".json"), "utf8")) }; } catch {}
+  try { P = { ...P, ...JSON.parse(fs.readFileSync(path.join(PDIR_READ, st.key + ".json"), "utf8")) }; } catch {}
   return P;
 };
 const loadAllParams = () => {
@@ -70,8 +82,8 @@ const loadAllParams = () => {
   return out;
 };
 const saveStratParams = (key, P) => {
-  fs.mkdirSync(PDIR, { recursive: true });
-  fs.writeFileSync(path.join(PDIR, key + ".json"), JSON.stringify(P, null, 2) + "\n");
+  fs.mkdirSync(PDIR_WRITE, { recursive: true });
+  fs.writeFileSync(path.join(PDIR_WRITE, key + ".json"), JSON.stringify(P, null, 2) + "\n");
 };
 const loadAlloc = () => {
   try { return JSON.parse(fs.readFileSync(ALLOC_FILE, "utf8")); } catch { return {}; }
@@ -117,7 +129,7 @@ function ensembleTune(days, iters, seedBase) {
   const alloc = {};
   STRATS.forEach((st, i2) => { alloc[st.key] = +Math.min(1.6, Math.max(0.4, shifted[i2] / mean)).toFixed(2); });
   fs.mkdirSync(STATE, { recursive: true });
-  fs.writeFileSync(ALLOC_FILE, JSON.stringify(alloc, null, 2) + "\n");
+  fs.writeFileSync(ALLOC_WRITE, JSON.stringify(alloc, null, 2) + "\n");
   log("risk allocation:", JSON.stringify(alloc));
   return { champs, scores, alloc };
 }
@@ -434,14 +446,22 @@ async function cmdTrade() {
             log(`missed movers today (${missed.length}): ${missed.slice(0, 20).join(",")}`);
             journal({ kind: "missed", syms: missed.slice(0, 40) });
           }
+          /* The nightly self-tune was removed on 2026-08-28.
+
+             It ran `ensembleTune` unattended here and assigned the result
+             straight into `Ps` and `alloc` -- the params and risk weights the
+             live account traded the next morning. Nothing reviewed it. Worse,
+             `ensembleTune` decides `improved` on the validation split alone,
+             so a pod whose frozen holdout printed DID NOT HOLD was promoted
+             and traded anyway; the honest number was computed, logged, and
+             read by no code at all.
+
+             Tuning still happens -- deliberately, via `engine.js tune`, into
+             the gitignored PDIR_WRITE, reviewed against a regress table and a
+             frozen holdout, and promoted by a human commit into PDIR_READ.
+             The trader no longer edits itself while nobody is watching. */
           const days = D.loadRecordedDays();
-          if (days.length >= 5) {
-            log(`nightly ENSEMBLE tune: ${STRATS.length} pods over ${days.length} recorded days…`);
-            const res = ensembleTune(days, 120, Date.now() % 100000);
-            Ps = res.champs;
-            alloc = res.alloc;
-            journal({ kind: "tune", scores: res.scores, alloc: res.alloc });
-          } else log(`nightly tune skipped — only ${days.length} recorded day(s), need 5`);
+          log(`day library now ${days.length} recorded days — tuning is a reviewed, committed step, not a nightly one`);
         }
         await sleep(60000);
         continue;
