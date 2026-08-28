@@ -17,10 +17,13 @@ Read `START-HERE.md` and `HANDOFF.md` first.
 
 ## Before anything: the deploy hazard
 
-`render.yaml` sets `autoDeploy: true` on `claude/algo-paper-trader`, and
-SIGTERM flattens open positions by design. **Any push to that branch during
-04:00–20:00 ET closes live paper trades.** With one person that is an
-occasional annoyance. With three agents it is a daily one.
+`render.yaml` sets `autoDeploy: true` on `claude/algo-paper-trader`, so any
+push to that branch redeploys immediately. As of `d96f331` a restart no longer
+flattens — the position book persists to the Render disk and broker-held RTH
+stops rest server-side, so the next boot resumes each position under its own
+pod's plan. **Deploys are safe during RTH (09:30–16:00 ET).** Outside those
+hours the stops are engine-managed and the 1s exit tick is down through the
+restart, so do not deploy premarket or after-hours unless the account is flat.
 
 Agents get worktrees and never push to the deploy branch:
 

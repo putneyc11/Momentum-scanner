@@ -14,18 +14,26 @@ start with `cd`, you're already in the right folder.
 
 ---
 
-## The one rule that can cost you money
+## Deploying mid-session — the rule changed on 2026-08-28
 
-```
-Never merge, push, or restart between 04:00 and 20:00 Eastern.
-```
+The old rule was *never push between 04:00 and 20:00 ET*, because shutdown
+called `closeAll()` and a deploy sold your open trades at market. **Commit
+`d96f331` removed that.** Restarts now hand off instead of flattening: the
+position book is written to the Render disk every loop, broker-held RTH stops
+keep resting server-side, and the next boot resumes each position under its own
+pod's plan. The 19:55 flatten still guarantees no overnight positions.
 
-`render.yaml` has `autoDeploy: true`. A push restarts the live process, and the
-process flattens every open position on shutdown, by design. Mid-session that
-means it sells your open trades at whatever the market is doing right then.
+**So a mid-session deploy is now safe during RTH.** One caveat worth knowing:
+for the minute or two the process is restarting, the 1-second fast-exit tick is
+not running. During regular hours that is covered, because the broker is holding
+your stops. In **premarket and after-hours** those stops are engine-managed
+(`brokerStop: null`), so a restart in those windows leaves positions unguarded
+until the new process boots.
 
-**Do all merging after 20:00 ET.** Reading, backtesting and tuning are safe at
-any hour — they only read files.
+**Rule of thumb: deploy freely 09:30–16:00 ET. Avoid 04:00–09:30 and
+16:00–20:00 unless you are flat.**
+
+Reading, backtesting and tuning are safe at any hour — they only read files.
 
 ---
 
@@ -58,7 +66,7 @@ act on it.
 The fix is already written and committed, on your machine, on a branch called
 `fix/tune-holdout`. Nothing has touched your live branch.
 
-**After 20:00 ET**, type these five lines:
+Type these five lines (any time during RTH — see the deploy note above):
 
 ```bash
 cd ~/algo-trader
@@ -203,7 +211,9 @@ you from re-testing in November what you already killed in August.
 
 ## Part 6 — the rules, one more time
 
-1. **Never merge or push between 04:00 and 20:00 ET.** It closes live trades.
+1. **Deploy during RTH (09:30–16:00 ET), not in the thin sessions.** Restarts
+   hand positions off rather than flattening them, but the 1s exit tick is down
+   during the restart and off-hours stops are engine-managed, not broker-held.
 2. **PAPER ONLY.** `lib/broker.js` throws on any non-paper URL. Never add a live
    path. Never put keys in chat, in either direction.
 3. **`node engine.js test` passes before any number is believed.**

@@ -127,10 +127,13 @@ you        merge at most one thing, outside session hours
 
 ## Rules that are not negotiable
 
-1. **Never push to `claude/algo-paper-trader` during 04:00–20:00 ET.**
-   `render.yaml` has `autoDeploy: true`, and SIGTERM flattens open positions —
-   a push mid-session closes live trades. Agents work in worktrees. You merge,
-   deliberately, after hours.
+1. **Deploy during RTH, not in the thin sessions.** This rule changed on
+   2026-08-28: `d96f331` removed the shutdown `closeAll()`, so a restart now
+   hands positions off — the book persists to the Render disk and broker-held
+   RTH stops rest server-side. A deploy between 09:30 and 16:00 ET is safe.
+   Between 04:00–09:30 and 16:00–20:00 the stops are engine-managed and the 1s
+   exit tick is down during the restart, so avoid deploying then unless flat.
+   Agents still work in worktrees; you still merge deliberately.
 2. **PAPER ONLY.** `lib/broker.js` throws on any non-paper URL. Never add a
    live path, never accept keys in chat.
 3. **`node engine.js test` passes before any result is believed**, and before
