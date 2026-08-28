@@ -35,6 +35,67 @@ You merge, by hand, after 20:00 ET.
 
 ---
 
+## Reporting standards, earned the expensive way on 2026-08-28
+
+Every one of these exists because a plausible result got published without it
+and had to be retracted the same night.
+
+**1. Grade an entry signal against a TIME-MATCHED control, and say which.**
+`research/edge.js` reports three, because there is no single clean one:
+
+```
+window     assumes nothing.        OVERSTATES  — confounded by time-of-day
+                                   clustering. redgreen fires 6,191 of 13,870
+                                   times in the 09:00 hour; against a whole-day
+                                   average it was credited 8.0x for knowing
+                                   what time it is. That killed HYP-001.
+hour       you knew the hour.
+bucket15   you knew the 15 min.    UNDERSTATES — a random minute inside a block
+                                   containing a burst is often PRE-burst, so the
+                                   control enters on hindsight. Every
+                                   confirmation-based trigger loses to it by
+                                   construction, because confirmation is late by
+                                   definition.
+```
+
+Quote all three or none. A signal that beats `window` and loses `bucket15` has
+found the neighbourhood, not the minute — which is a diagnosis, not a failure.
+
+**2. Report profit factor across participation levels, not at 10% alone.**
+`MAX_BAR_PARTICIPATION` is 10% and the source itself calls that "the loosest
+number that is still honest." HYP-001 scored PF 1.16 at 10%, 1.12 at 5%, 1.05
+at 2% and **1.00 at 1%** — the entire result lived in an aggressive fill
+assumption, and one number hid that.
+
+**3. Ship the exit-reason mix next to every score.** Raising `maxStopPct` lifts
+only a cap; the `minStopPct` floor and ATR distance still set the stop. A
+"wider stop" champion turned out to be 87.5% VWAP and time exits — an
+exit-policy change wearing a stop-width label. The mix makes that
+self-describing instead of something a reviewer has to remember to ask.
+
+**4. Never select on a sweep that saw the holdout, then call the holdout
+out-of-sample.** `research/stops2.js` scored six stop triples over the full 144
+days and both halves; picking the best row spent every day later called "test."
+Disclosing it as "in-sample to my own search" was not enough — with no
+independent tune run, there was nothing left to verify the claim with.
+
+**5. Execute the check; do not reason about the code.** Four attributions were
+wrong tonight before being measured: the participation cap was blamed for a
+drop the rider stall exit caused; turning `vwapExit` off "obviously" helps
+redgreen and actually costs it 0.11; redgreen's exit parameters were assumed to
+matter and a 5x4 grid is flat because the stop fires first; and `edge.js` had
+two separate defects, each flattering the hypothesis under test. Run it.
+
+## Known divergence, unfixed
+
+**Live and backtest size differently.** The backtest fills at the next bar's
+open and caps quantity on the *next* bar's volume (`lib/backtest.js:90-107`);
+live sizes from the signal bar's close, `sig.risk`, and the *signal* bar's
+volume (`engine.js:733-749`). A gap or a volume change between those two bars
+moves risk and capacity in opposite directions. Nothing tonight depended on it,
+but **backtest profit factor is not an estimate of the traded system** until it
+is fixed. Worth its own HYP.
+
 ## The merge gate — not optional
 
 Before any change to `lib/` is proposed for merge, whoever made it runs:
