@@ -56,6 +56,18 @@ a correct fix for a real problem — a dead position was holding a slot all day
 for eight hours, because nothing compared before to after. Agents will produce
 that failure faster than people do.
 
+**The gate is blind to a pure `RANGES` change, by construction.** It scores
+`DEFAULTS`, so widening or narrowing the tuner's search space always returns a
+table of exact `0.00` deltas and always PASSes. That is correct behaviour — the
+change genuinely moves no pod's default score — but a PASS there is not
+evidence of anything, and presenting it as evidence is worse than omitting it.
+
+For a range change, the table that means something is an **A/B tune**: the same
+pods, same seeds, same cost model, same days, run once inside the old bounds and
+once inside the new ones. `base -> best` within a single tune only shows that
+tuning beat not-tuning; it cannot separate "the wider box found something" from
+"200 iterations found something." Report the frozen holdout from both arms.
+
 Two things the gate deliberately does not do:
 
 - It does not read `state/params`. Saved champions differ per machine and move
