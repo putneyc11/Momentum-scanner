@@ -45,6 +45,7 @@ Reading, backtesting and tuning are safe at any hour — they only read files.
 | `node engine.js backtest` | Replays all 7 pods over your recorded days. Read-only. | ~40 sec |
 | `node engine.js tune --iters 200` | Searches for better parameters and saves winners. | **~80 min** |
 | `node engine.js report` | What the live paper account has actually done. | instant |
+| `node engine.js regress --base <ref>` | Did a change cost any pod its edge? | ~90 sec |
 
 Two of these need your Alpaca keys loaded first:
 
@@ -194,6 +195,41 @@ agents that doesn't end in a committed test is wasted tokens.
 **Expect to kill most hypotheses.** Killing fast is the skill. Keep the dead
 ones in `HYP/` with their verdicts — the graveyard is the only thing stopping
 you from re-testing in November what you already killed in August.
+
+---
+
+## Part 4b — the merge gate
+
+Before anything from an agent goes onto the live branch, run this from
+`~/algo-trader`:
+
+```bash
+node engine.js regress --base <the commit they branched from>
+```
+
+You get a table like this — this is the real one, run against the commit
+before the rider stall exit:
+
+```
+pod           base PF   head PF     delta   base trades   head trades   status
+moon             1.24      0.96     -0.28          1019          1911   REGRESSED
+redgreen         0.93      0.81     -0.12          2905          3152   REGRESSED
+surge            0.62       0.6     -0.02          1532          1835   ok
+gapgo             0.7      0.72     +0.02          4766          5806   ok
+```
+
+Read it left to right: what the pod scored before the change, what it scores
+now, and the difference. **REGRESSED means that change cost that pod money.**
+
+Two of those are real and they mean different things. moon `-0.28` is a
+genuine loss of edge — the stall exit cut the moonshots short, and it is
+recoverable by setting `timeStopMin` to 300. redgreen `-0.12` is the
+participation cap, which removed fills that could never have happened; that
+number *should* go down, because the old one was fiction.
+
+So the gate does not decide for you. It makes the change impossible to miss.
+The rule is simple: **if the table shows REGRESSED, the person proposing the
+change has to explain it before it merges.** No table, no merge.
 
 ---
 

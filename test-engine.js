@@ -49,7 +49,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 
 /* ---- backtest mechanics ---- */
 {
-  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 100, flattenMin: 955 };
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBpsOverride: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 100, flattenMin: 955 };
   const mk = (post) => {
     const bars = [];
     for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
@@ -95,7 +95,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 
 /* ---- scale-out: 85% banked at the target, runner rides with break-even floor ---- */
 {
-  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 85, reentryLimit: 1, flattenMin: 955 };
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBpsOverride: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 85, reentryLimit: 1, flattenMin: 955 };
   const bars = [];
   for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
   for (let m = 570; m < 575; m++) bars.push(bar(m, 2, 2.1, 1.98, 2.05, 40000));
@@ -536,6 +536,99 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
         ok(r && typeof r.equity === "number", "a backfilled day file replays through runDay");
       } finally { try { fsx.unlinkSync(file); } catch {} }
     }
+  }
+
+  /* ---- regression gate ---- */
+  {
+    const RG = require("./lib/regress");
+    const { STRATS } = require("./lib/strategies");
+    const days = makeLibrary(8, 7);
+
+    /* A pod that got worse must fail; a pod that got better must not. The gate
+       compares against -maxDrop rather than the absolute delta, because an
+       improvement is not a regression. */
+    const fakeScores = (pf) => new Map(pf.map(([k, v]) => [k, { profitFactor: v, trades: 10 }]));
+    const rowsFor = (base, head) => {
+      const rows = [];
+      let failed = false;
+      for (const [k, b] of fakeScores(base)) {
+        const h = fakeScores(head).get(k);
+        const delta = +(h.profitFactor - b.profitFactor).toFixed(4);
+        const regressed = delta < -0.03;
+        if (regressed) failed = true;
+        rows.push({ k, delta, regressed });
+      }
+      return { rows, failed };
+    };
+    ok(rowsFor([["a", 1.24]], [["a", 0.96]]).failed, "gate fails a pod that lost profit factor");
+    ok(!rowsFor([["a", 0.96]], [["a", 1.24]]).failed, "gate does not fail a pod that improved");
+    ok(!rowsFor([["a", 1.00]], [["a", 0.98]]).failed, "gate tolerates noise inside maxDrop");
+
+    /* scoreAll must key by pod and cover every strategy, or the comparison
+       silently skips whatever it failed to score. */
+    const head = { STRATS, DEFAULTS, runBacktest };
+    const scored = RG.scoreAll(head, days, 100000);
+    ok(scored.size === STRATS.length && STRATS.every((s) => scored.has(s.key)),
+      "scoreAll returns one metrics row per pod");
+
+    /* Scoring the same code twice must give identical numbers. If this ever
+       fails the gate is non-deterministic and every verdict it has given is
+       void. Deliberately NOT written as compare(days, "HEAD"): that scores the
+       working tree against HEAD, so it would fail for anyone with uncommitted
+       work — which is everyone who is mid-change and running the tests. */
+    const a = RG.scoreAll(head, days, 100000);
+    const b = RG.scoreAll(head, days, 100000);
+    ok([...a.keys()].every((k) => a.get(k).profitFactor === b.get(k).profitFactor
+      && a.get(k).trades === b.get(k).trades),
+      "scoring the same code twice is deterministic");
+
+    /* And the loader must reproduce a historical ref byte-for-byte in its
+       scores, or "base" means nothing. Load the same ref twice, score both. */
+    const l1 = RG.loadLibAt("HEAD", __dirname), l2 = RG.loadLibAt("HEAD", __dirname);
+    const s1 = RG.scoreAll(l1, days, 100000), s2 = RG.scoreAll(l2, days, 100000);
+    ok([...s1.keys()].every((k) => s1.get(k).profitFactor === s2.get(k).profitFactor),
+      "loading and scoring the same ref twice is deterministic");
+
+    /* An unusable ref must be an error, never a silent pass. */
+    let threw = false;
+    try { RG.compare(days, "not-a-real-ref", { repoRoot: __dirname }); } catch { threw = true; }
+    ok(threw, "an invalid base ref throws instead of reporting a pass");
+  }
+
+  /* ---- the trader does not tune itself ---- */
+  {
+    const fsx = require("fs"), pathx = require("path");
+    const src = fsx.readFileSync(pathx.join(__dirname, "engine.js"), "utf8");
+
+    /* The live loop must never promote a tuned champion on its own. This is a
+       source assertion rather than a behavioural one because the thing being
+       prevented is a code path returning, not a value being wrong. */
+    const loopStart = src.indexOf("async function cmdTrade");
+    const loop = loopStart > -1 ? src.slice(loopStart) : "";
+    ok(loop.length > 0, "cmdTrade is findable for the self-tune assertions");
+    ok(!/ensembleTune\s*\(/.test(loop), "the live trade loop never calls ensembleTune");
+    ok(!/\bPs\s*=\s*res\.champs/.test(src), "nothing assigns tuned champions into live params");
+    ok(!/\balloc\s*=\s*res\.alloc/.test(src), "nothing assigns tuned weights into live allocation");
+
+    /* Tuning still exists as a deliberate command -- removing self-tuning must
+       not remove the ability to tune. */
+    ok(/function cmdTune/.test(src) && /tune:\s*cmdTune/.test(src),
+      "engine.js tune is still available as an explicit command");
+
+    /* Production reads git; tuning writes local. If these ever point at the
+       same place, an agent's overnight search reaches the account by itself. */
+    ok(/const PDIR_READ = path\.join\(__dirname, "params"\)/.test(src),
+      "production reads params from the git-tracked params/ directory");
+    ok(/const PDIR_WRITE = path\.join\(STATE, "params"\)/.test(src),
+      "tuning writes params to the gitignored state/ directory");
+    ok(/readFileSync\(path\.join\(PDIR_READ,/.test(src) && !/readFileSync\(path\.join\(PDIR_WRITE,/.test(src),
+      "params are only ever READ from the reviewed directory");
+    ok(/writeFileSync\(path\.join\(PDIR_WRITE,/.test(src) && !/writeFileSync\(path\.join\(PDIR_READ,/.test(src),
+      "params are only ever WRITTEN to the unreviewed directory");
+
+    /* Day recording is what grows the library every agent depends on. Removing
+       the nightly tune must not take it with it. */
+    ok(/D\.recordDay\(/.test(loop), "the live loop still records each day to the library");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

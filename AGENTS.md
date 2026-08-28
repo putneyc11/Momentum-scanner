@@ -35,6 +35,114 @@ You merge, by hand, after 20:00 ET.
 
 ---
 
+## Reporting standards, earned the expensive way on 2026-08-28
+
+Every one of these exists because a plausible result got published without it
+and had to be retracted the same night.
+
+**1. Grade an entry signal against a TIME-MATCHED control, and say which.**
+`research/edge.js` reports three, because there is no single clean one:
+
+```
+window     assumes nothing.        OVERSTATES  — confounded by time-of-day
+                                   clustering. redgreen fires 6,191 of 13,870
+                                   times in the 09:00 hour; against a whole-day
+                                   average it was credited 8.0x for knowing
+                                   what time it is. That killed HYP-001.
+hour       you knew the hour.
+bucket15   you knew the 15 min.    UNDERSTATES — a random minute inside a block
+                                   containing a burst is often PRE-burst, so the
+                                   control enters on hindsight. Every
+                                   confirmation-based trigger loses to it by
+                                   construction, because confirmation is late by
+                                   definition.
+```
+
+Quote all three or none. A signal that beats `window` and loses `bucket15` has
+found the neighbourhood, not the minute — which is a diagnosis, not a failure.
+
+**2. Report profit factor across participation levels, not at 10% alone.**
+`MAX_BAR_PARTICIPATION` is 10% and the source itself calls that "the loosest
+number that is still honest." HYP-001 scored PF 1.16 at 10%, 1.12 at 5%, 1.05
+at 2% and **1.00 at 1%** — the entire result lived in an aggressive fill
+assumption, and one number hid that.
+
+**3. Ship the exit-reason mix next to every score.** Raising `maxStopPct` lifts
+only a cap; the `minStopPct` floor and ATR distance still set the stop. A
+"wider stop" champion turned out to be 87.5% VWAP and time exits — an
+exit-policy change wearing a stop-width label. The mix makes that
+self-describing instead of something a reviewer has to remember to ask.
+
+**4. Never select on a sweep that saw the holdout, then call the holdout
+out-of-sample.** `research/stops2.js` scored six stop triples over the full 144
+days and both halves; picking the best row spent every day later called "test."
+Disclosing it as "in-sample to my own search" was not enough — with no
+independent tune run, there was nothing left to verify the claim with.
+
+**5. Execute the check; do not reason about the code.** Four attributions were
+wrong tonight before being measured: the participation cap was blamed for a
+drop the rider stall exit caused; turning `vwapExit` off "obviously" helps
+redgreen and actually costs it 0.11; redgreen's exit parameters were assumed to
+matter and a 5x4 grid is flat because the stop fires first; and `edge.js` had
+two separate defects, each flattering the hypothesis under test. Run it.
+
+## Known divergence, unfixed
+
+**Live and backtest size differently.** The backtest fills at the next bar's
+open and caps quantity on the *next* bar's volume (`lib/backtest.js:90-107`);
+live sizes from the signal bar's close, `sig.risk`, and the *signal* bar's
+volume (`engine.js:733-749`). A gap or a volume change between those two bars
+moves risk and capacity in opposite directions. Nothing tonight depended on it,
+but **backtest profit factor is not an estimate of the traded system** until it
+is fixed. Worth its own HYP.
+
+## The merge gate — not optional
+
+Before any change to `lib/` is proposed for merge, whoever made it runs:
+
+```bash
+node engine.js test                       # must be 0 failed
+node engine.js regress --base <the ref you branched from>
+```
+
+`regress` replays every pod over the recorded days twice — once with the
+strategy code at `--base`, once with the working tree — and prints a
+before/after profit-factor table. It exits 1 if any pod lost more than 0.03
+profit factor. **Paste that table into the proposal.** A change with no table
+is not reviewable and does not get merged.
+
+This exists because of a real failure on 2026-08-28. The rider stall exit was
+a correct fix for a real problem — a dead position was holding a slot all day
+— and it quietly took moon from profit factor 1.24 to 1.02. It went unnoticed
+for eight hours, because nothing compared before to after. Agents will produce
+that failure faster than people do.
+
+**The gate is blind to a pure `RANGES` change, by construction.** It scores
+`DEFAULTS`, so widening or narrowing the tuner's search space always returns a
+table of exact `0.00` deltas and always PASSes. That is correct behaviour — the
+change genuinely moves no pod's default score — but a PASS there is not
+evidence of anything, and presenting it as evidence is worse than omitting it.
+
+For a range change, the table that means something is an **A/B tune**: the same
+pods, same seeds, same cost model, same days, run once inside the old bounds and
+once inside the new ones. `base -> best` within a single tune only shows that
+tuning beat not-tuning; it cannot separate "the wider box found something" from
+"200 iterations found something." Report the frozen holdout from both arms.
+
+Two things the gate deliberately does not do:
+
+- It does not read `state/params`. Saved champions differ per machine and move
+  with every tune, so scoring against them would make the verdict
+  irreproducible. It compares `DEFAULTS`, which are in git.
+- It does not block an improvement, and it does not block a pod being added.
+
+A FAIL is not automatically a veto. The participation cap fails this gate
+against its own parent, and it should — it removed fictional fills, so the
+honest number is lower. The rule is that a FAIL must be **explained in the
+proposal**, not silently carried.
+
+---
+
 ## 1. Grok — the daily research pass
 
 This is the one that runs **every day**, and it is the only role that needs
