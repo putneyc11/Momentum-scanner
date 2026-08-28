@@ -36,6 +36,7 @@
 const fs = require("fs");
 const path = require("path");
 const D = require("./lib/data");
+const BF = require("./lib/backfill");
 const { startDashboard } = require("./lib/dashboard");
 const { PaperBroker } = require("./lib/broker");
 const { prepSeries, exitCheck, entryViable } = require("./lib/strategy");
@@ -120,6 +121,10 @@ const arg = (name, dflt) => {
   const i = process.argv.indexOf("--" + name);
   return i > -1 ? Number(process.argv[i + 1]) : dflt;
 };
+const argStr = (name, dflt) => {
+  const i = process.argv.indexOf("--" + name);
+  return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : dflt;
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function loadDaysOrSynth() {
@@ -143,6 +148,42 @@ async function cmdScan() {
   const list = await D.discover(keys);
   log(`session: ${D.inPremarket() ? "PREMARKET" : D.inRTH() ? "RTH" : "closed"} — ${list.length} qualifiers`);
   for (const c of list) console.log(`  ${c.symbol.padEnd(6)} $${c.price.toFixed(2).padStart(8)}  +${c.pct.toFixed(1)}%`);
+}
+
+/* Rebuild the recorded-day library from history, so the nightly tuner has
+   more than a working week to search over. Skips dates already on disk, so
+   it is safe to re-run and safe to interrupt. */
+async function cmdBackfill() {
+  const keys = D.keysFromEnv();
+  if (!keys) return log("set APCA_API_KEY_ID / APCA_API_SECRET_KEY first");
+  const end = argStr("end", D.etDayISO(Date.now() - 864e5));
+  const start = argStr("start", new Date(Date.parse(end) - 180 * 864e5).toISOString().slice(0, 10));
+  const dates = BF.tradingDates(start, end);
+  const dir = path.join(D.STATE, "days");
+  const have = new Set((() => { try { return fs.readdirSync(dir).map((f) => f.replace(/\.json$/, "")); } catch { return []; } })());
+  const todo = dates.filter((d) => !have.has(d));
+
+  log(`backfill ${start} -> ${end}: ${dates.length} weekdays, ${have.size} already on disk, ${todo.length} to fetch`);
+  log(`survivorship note: the universe is TODAY's active assets, so anything`);
+  log(`delisted since is absent. Backfilled days are training material, not evidence.`);
+  if (!todo.length) return;
+
+  const uni = await D.universe(keys);
+  log(`universe: ${uni.length} Robinhood-tradable symbols`);
+
+  let made = 0, empty = 0;
+  for (const date of todo) {
+    try {
+      const r = await BF.backfillDay(keys, date, uni, log);
+      if (r) made++; else empty++;
+    } catch (e) { log(`  ${date}  FAILED: ${String(e.message).slice(0, 120)}`); empty++; }
+  }
+  const total = (() => { try { return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).length; } catch { return 0; } })();
+  log(`backfill done: ${made} days written, ${empty} skipped. Library now ${total} days.`);
+  if (total >= 5) {
+    const cut = Math.max(1, Math.floor(total * 0.7));
+    log(`tuner split is now train=${cut} / validate=${total - cut}.`);
+  } else log(`still under the 5-day tune gate.`);
 }
 
 function cmdBacktest() {
@@ -645,5 +686,6 @@ async function cmdTrade() {
 const cmd = process.argv[2] || "report";
 ({
   scan: cmdScan, trade: cmdTrade, backtest: cmdBacktest, tune: cmdTune, report: cmdReport,
+  backfill: cmdBackfill,
   test: () => require("./test-engine.js"),
-}[cmd] || (() => console.log("commands: trade | scan | backtest | tune | report | test")))();
+}[cmd] || (() => console.log("commands: trade | scan | backfill | backtest | tune | report | test")))();

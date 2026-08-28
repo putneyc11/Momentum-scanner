@@ -315,6 +315,107 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   srv2.close();
   delete process.env.DASH_TOKEN;
 
+
+  /* ---- backfill: historical day reconstruction ---- */
+  {
+    const BF = require("./lib/backfill");
+    const DD = require("./lib/data");
+
+    /* stage-1 superset screen */
+    ok(BF.couldQualify({ o: 1, h: 1.4, l: 0.95, c: 1.0, v: 4e5 }, 1.0),
+      "couldQualify keeps a day that ran +40% intraday and closed flat");
+    ok(!BF.couldQualify({ o: 1, h: 1.05, l: 0.95, c: 1.0, v: 9e6 }, 1.0),
+      "couldQualify drops a day that never reached the loosest gain floor");
+    ok(!BF.couldQualify({ o: 1, h: 1.4, l: 0.95, c: 1.0, v: 1e4 }, 1.0),
+      "couldQualify drops a day under the loosest volume floor");
+    ok(!BF.couldQualify({ o: 200, h: 300, l: 150, c: 280, v: 9e6 }, 100),
+      "couldQualify drops a day that never traded under the price cap");
+    ok(!BF.couldQualify({ o: 1, h: 2, l: 0.9, c: 1.8, v: 9e6 }, 0.01),
+      "couldQualify drops a sub-nickel prior close");
+
+    /* The case a close-based screen loses: gapped +20% premarket, faded to
+       flat by the bell. Live discovery ranks it at 04:xx and remembers it. */
+    {
+      const bars = [];
+      for (let m = 240; m < 300; m++) bars.push(bar(m, 1.2, 1.22, 1.18, 1.2, 2000));
+      for (let m = 570; m < 700; m++) bars.push(bar(m, 1.0, 1.02, 0.98, 1.0, 1000));
+      ok(BF.replayDiscovery({ FADE: bars }, { FADE: 1.0 }).includes("FADE"),
+        "replayDiscovery catches a premarket gapper that faded by the open");
+    }
+
+    /* Same gap, no volume behind it — the PM volume floor rejects dead tape. */
+    {
+      const bars = [];
+      for (let m = 240; m < 300; m++) bars.push(bar(m, 1.2, 1.22, 1.18, 1.2, 100));
+      ok(!BF.replayDiscovery({ THIN: bars }, { THIN: 1.0 }).includes("THIN"),
+        "replayDiscovery rejects a premarket gap on dead tape");
+    }
+
+    /* RTH fast lane: +12% on 300K enters; the same move on 100K does not. */
+    {
+      const mk = (v) => { const b = []; for (let m = 570; m < 640; m++) b.push(bar(m, 1.13, 1.14, 1.12, 1.13, v)); return b; };
+      ok(BF.replayDiscovery({ FAST: mk(6000) }, { FAST: 1.0 }).includes("FAST"),
+        "replayDiscovery admits the RTH fast lane at +12% on 300K+ shares");
+      ok(!BF.replayDiscovery({ SLOW: mk(1000) }, { SLOW: 1.0 }).includes("SLOW"),
+        "replayDiscovery holds the fast lane below its volume floor");
+    }
+
+    /* Classic lane: +25% once the 5M floor clears. */
+    {
+      const b = []; for (let m = 570; m < 700; m++) b.push(bar(m, 1.3, 1.31, 1.29, 1.3, 60000));
+      ok(BF.replayDiscovery({ BIG: b }, { BIG: 1.0 }).includes("BIG"),
+        "replayDiscovery admits the classic +25% lane once volume clears");
+    }
+
+    /* After-hours references TODAY's close, not the prior close. */
+    {
+      const flat = []; for (let m = 570; m < 960; m++) flat.push(bar(m, 1, 1.01, 0.99, 1.0, 20000));
+      const pop = [...flat]; for (let m = 960; m < 1050; m++) pop.push(bar(m, 1.15, 1.16, 1.14, 1.15, 5000));
+      ok(BF.replayDiscovery({ NEWS: pop }, { NEWS: 1.0 }).includes("NEWS"),
+        "replayDiscovery ranks a 17:00 gapper against today's close");
+
+      /* Up 15% on the day but too thin to clear the RTH fast lane (273K < 300K),
+         then FLAT after the bell on volume that does clear the AH floor. The AH
+         gate must measure against today's close (0%, rejected). If it wrongly
+         used the prior close it would read +15% and rank. */
+      const drift = []; for (let m = 570; m < 960; m++) drift.push(bar(m, 1.15, 1.16, 1.14, 1.15, 700));
+      for (let m = 960; m < 1050; m++) drift.push(bar(m, 1.15, 1.16, 1.14, 1.15, 400));
+      ok(!BF.replayDiscovery({ DRIFT: drift }, { DRIFT: 1.0 }).includes("DRIFT"),
+        "after-hours gate measures against today's close, not the prior close");
+    }
+
+    /* The floors are imported, never re-declared — a second copy that drifts
+       from the live one is the churn-guard failure mode all over again. */
+    ok(!require("fs").readFileSync(require("path").join(__dirname, "lib/backfill.js"), "utf8")
+        .match(/(PM_PCT_FLOOR|FAST_VOL_FLOOR|MIN_DAY_VOL|RTH_PCT_FLOOR)\s*=/),
+      "backfill re-declares no discovery threshold of its own");
+
+    /* calendar + DST */
+    ok(BF.tradingDates("2026-03-06", "2026-03-09").join(",") === "2026-03-06,2026-03-09",
+      "tradingDates skips the weekend");
+    const est = BF.etWindow("2026-01-15"), edt = BF.etWindow("2026-07-10");
+    ok(DD.etMinute(Date.parse(est.start)) === 240 && DD.etMinute(Date.parse(edt.start)) === 240,
+      "etWindow starts at 04:00 ET on both sides of the DST change");
+    ok(est.start.endsWith("09:00:00.000Z") && edt.start.endsWith("08:00:00.000Z"),
+      "etWindow tracks the UTC offset (EST 09:00Z, EDT 08:00Z)");
+
+    /* A backfilled day must be indistinguishable from a recorded one. */
+    {
+      const fsx = require("fs"), pathx = require("path");
+      const date = "1990-01-02";                        // unmistakably a test artifact
+      const file = pathx.join(DD.STATE, "days", `${date}.json`);
+      const bars = []; for (let m = 570; m < 700; m++) bars.push(bar(m, 1, 1.02, 0.99, 1.01, 50000));
+      try {
+        DD.recordDayFor(date, { TSTX: bars });
+        const day = JSON.parse(fsx.readFileSync(file, "utf8"));
+        ok(day.date === date && Array.isArray(day.symbols.TSTX) && day.symbols.TSTX[0].m === 570,
+          "recordDayFor writes the {date, symbols:{SYM:[bars]}} shape the backtester reads");
+        const r = runDay(day, DEFAULTS, 100000);
+        ok(r && typeof r.equity === "number", "a backfilled day file replays through runDay");
+      } finally { try { fsx.unlinkSync(file); } catch {} }
+    }
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -1,0 +1,210 @@
+# Who does what
+
+Three agents, three roles, one rule that makes it work: **the agent that
+invents an idea never grades it.** Doubt has to come from something with no
+stake in the answer.
+
+Read `START-HERE.md` and `HANDOFF.md` first.
+
+| | Agent | Owns | May edit | May never edit |
+|---|---|---|---|---|
+| 1 | **Grok** — the scout | today's ideas | `HYP/HYP-###.md` | any code |
+| 2 | **Claude Code** — the builder | implementation | one pod's files, in its own worktree | `HYP/`, `REVIEWS/`, `lib/tune.js` |
+| 3 | **Codex** — the red team | doubt | `REVIEWS/HYP-###.md` | everything else |
+| — | **You** | the merge | anything | — |
+
+---
+
+## Before anything: the deploy hazard
+
+`render.yaml` sets `autoDeploy: true` on `claude/algo-paper-trader`, and
+SIGTERM flattens open positions by design. **Any push to that branch during
+04:00–20:00 ET closes live paper trades.** With one person that is an
+occasional annoyance. With three agents it is a daily one.
+
+Agents get worktrees and never push to the deploy branch:
+
+```bash
+./scripts/new-hyp.sh 007          # branch hyp/007, worktree ../algo-hyp-007
+```
+
+You merge, by hand, after 20:00 ET.
+
+---
+
+## 1. Grok — the daily research pass
+
+This is the one that runs **every day**, and it is the only role that needs
+information from outside the repo.
+
+Two inputs, both of which already exist:
+
+- **The missed-mover audit.** `noteMovers` records every symbol that ever
+  ranked in discovery, whether or not a pod traded it. After the backfill you
+  have months of these. They are the record of what the engine *saw and did
+  not take*, and nobody has read them.
+- **The tape.** X, filings, halts, news — why those specific names moved.
+
+### The daily prompt
+
+> You are the scout on a small-cap momentum trading system. It runs seven
+> models on one paper account: two RIDERS (`moon`, `surge` — no profit target,
+> exit only on a dip off the high-water mark) and five QUICK-STRIKE pods
+> (`gapgo`, `reclaim`, `flag`, `igniter`, `redgreen` — ~1.3R targets, 90%
+> banked, dip re-entries).
+>
+> Discovery screens the full market for Robinhood-tradable names: premarket
+> ≥10% vs prior close on ≥25K shares; RTH ≥25% on ≥5M shares, or a fast lane
+> at ≥12% on ≥300K; after-hours ≥10% vs today's close.
+>
+> Here are the symbols that ranked yesterday and were NOT traded:
+> `<paste the missed-mover list>`
+>
+> Research what actually moved them. Then propose ONE hypothesis. It must be
+> expressible as exactly one of:
+>
+> **(a) a discovery change** — a gate in `lib/data.js` (a floor, a price bound,
+>   a session window)
+> **(b) an entry-signal change** — a condition inside one named pod's
+>   `signalAt` in `lib/strategies.js`
+> **(c) a parameter-range change** — a knob in `RANGES` in `lib/strategy.js`
+>
+> If it does not fit (a), (b) or (c), it is not implementable here — discard it
+> and propose something else.
+>
+> Give me five things and nothing more:
+> 1. **Claim** — one sentence, specific and numeric.
+> 2. **Category** — (a), (b) or (c), and which file and pod.
+> 3. **Mechanism** — why it might be true, two sentences.
+> 4. **Falsifier** — the specific backtest result that kills it.
+> 5. **Cost** — how many of yesterday's ranked movers does this add or remove?
+>
+> If you cannot write #4, the idea is not testable. Discard it.
+>
+> Do not write code. Do not tell me an idea is promising.
+
+Good: *"Names that gapped ≥10% premarket on a halt-resume rather than on news
+give back the gap within 30 minutes. Category (a): add a halt-resume exclusion
+to discovery. Falsified if excluding them does not raise `gapgo`'s validate
+score."*
+
+Bad: *"Look for stocks with strong catalysts."* Not a rule. Reject and re-ask.
+
+Save as `HYP/HYP-007.md`.
+
+**Why the constraint matters:** an unconstrained scout produces market
+commentary, which is free and worth what it costs. Forcing every idea through
+(a)/(b)/(c) means it lands somewhere you already have machinery to test it.
+
+---
+
+## 2. Claude Code — the builder
+
+**Seven pods is seven genuinely non-colliding workstreams.** This is the only
+place in the system where parallelism actually pays: each pod has its own
+`signalAt`, its own champion in `state/params/<pod>.json`, and its own tune.
+Two agents on two pods never touch the same line.
+
+From inside the worktree:
+
+> Read `HANDOFF.md`, `START-HERE.md`, `lib/strategies.js`, and `HYP/HYP-007.md`.
+>
+> Implement exactly the change in HYP-007. Nothing else.
+>
+> Constraints:
+> - Touch ONE pod. If the hypothesis needs changes to more than one, stop and
+>   say so — it needs splitting into separate hypotheses.
+> - Do not edit `lib/tune.js`. The referee does not get edited by the player.
+> - Do not edit `lib/backtest.js` unless the hypothesis is explicitly about the
+>   fill model. If you do, invariant #3 is now your problem: `entryViable` must
+>   behave identically there and in the live loop.
+> - Riders (`moon`, `surge`) never get profit targets. Their RANGES exclude
+>   `targetR`/`scaleOutPct` deliberately — invariant #4.
+> - Add a test to `test-engine.js` for any new condition you introduce.
+> - `node engine.js test` must pass.
+>
+> Then run and paste the RAW output of:
+> ```
+> node engine.js test
+> node engine.js backtest
+> node engine.js tune --iters 200 --seed 11
+> node engine.js tune --iters 200 --seed 29
+> ```
+>
+> Two seeds, because one tuning run is a sample of one. Report the pod's
+> before/after on both seeds as a table. Do not editorialise about whether the
+> result looks promising.
+
+---
+
+## 3. Codex — the red team
+
+The highest-value seat, and the easiest to ruin. Ruin it by telling Codex what
+you hope it finds. Clean session, no build history, no hint that you like the
+result.
+
+> This repository backtests and paper-trades a momentum strategy. A change to
+> one pod reportedly improved its score. Find the reason that result is wrong.
+> Assume it is wrong. Your default conclusion is "this does not survive."
+>
+> Read `lib/backtest.js`, `lib/tune.js`, `lib/strategy.js`, `lib/backfill.js`,
+> and the changed pod in `lib/strategies.js`.
+>
+> Work through:
+>
+> 1. **Churn-guard divergence (invariant #3).** Does `entryViable` behave
+>    identically in `lib/backtest.js` and the live loop in `engine.js`? This
+>    rots silently the moment anyone touches either side, and every tuning
+>    result depends on it. Show the two call sites.
+> 2. **Validation leakage.** `lib/tune.js` ratchets `champValid` on every
+>    acceptance. How many candidates were scored against the validation split
+>    in this run? Is the reported `bestScore.valid` an unbiased estimate or the
+>    maximum of many draws?
+> 3. **Backfill bias.** The library is reconstructed from currently-active
+>    assets, so delisted names are absent. Which direction does that push this
+>    pod's result, and roughly how far?
+> 4. **Lookahead.** Does any decision use information from after the moment of
+>    that decision? Check the entry fill (next bar's open), the stop/target
+>    ordering, and anything reading a whole-day field at signal time.
+> 5. **Fill realism.** Could these entries actually be filled at these sizes on
+>    these names? Check the volume on the entry bar.
+> 6. **Regime.** Split the day library in half chronologically and rerun. Does
+>    the improvement exist in both halves, or one?
+> 7. **Parameter count.** How many knobs moved? Against how many days?
+>
+> Output: a numbered list of concrete defects with `file:line`, each marked
+> FATAL / SERIOUS / MINOR, then one final line: KILL or SURVIVES-REVIEW.
+> Prefer KILL when uncertain.
+
+Save as `REVIEWS/HYP-007.md`.
+
+---
+
+## The rhythm
+
+```
+premarket   Grok: yesterday's missed movers -> one HYP file
+during day  nobody touches the deploy branch
+20:05 ET    engine records the day and runs the ensemble tune
+evening     Claude implements, one pod per worktree, two tuning seeds
+next day    Codex red-teams anything that beat its champion
+after 20:00 you merge at most one thing
+```
+
+You will kill most of them. **Killing fast is the skill.** Keep the losers in
+`HYP/` with their verdicts — the graveyard is the only thing stopping you from
+re-testing in November what you already killed in August.
+
+---
+
+## When agents disagree
+
+They will. Claude reports a validate score up 40%; Codex calls it leakage.
+
+The tiebreaker is never "which agent is smarter." It is: **make the
+disagreement run.** Ask Codex to write the specific test that would expose the
+defect it claims, add it to `test-engine.js`, and run it. Either it fails and
+Codex was right, or it passes and the objection is answered on the record.
+
+An argument between two agents that does not end in a committed test is wasted
+tokens.
