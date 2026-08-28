@@ -337,6 +337,84 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(inRange, "cross-pollinated params stay inside the pod's declared ranges");
 }
 
+/* ---- HYP-002: the widened stop search space ----
+   The old ceilings (stopAtrMult 3 / minStopPct 4 / maxStopPct 12) excluded the
+   whole region where profit factor was still improving, so the nightly tuner
+   searched a box that could not contain the answer. These assertions pin the
+   new box: what it must reach, what it must still reach, and where it stops. */
+{
+  const { STRATS, MGMT_RANGES } = require("./lib/strategies");
+  /* the measured improving region, from the 144-day sweep behind HYP-002 */
+  const REACH = { stopAtrMult: 12, minStopPct: 30, maxStopPct: 90 };
+  /* the floors the box had before, which must stay reachable */
+  const FLOOR = { stopAtrMult: 0.8, minStopPct: 1, maxStopPct: 4 };
+  const covers = (R) => Object.entries(REACH).every(([k, v]) => R[k] && R[k][1] >= v);
+  const keepsFloor = (R) => Object.entries(FLOOR).every(([k, v]) => R[k] && R[k][0] <= v + 1e-9);
+
+  ok(covers(RANGES) && covers(MGMT_RANGES),
+    "both stop search spaces reach the measured region (ATR×12 / 30% / 90%)");
+  ok(keepsFloor(RANGES) && keepsFloor(MGMT_RANGES),
+    "widening did not raise the floors — tight stops are still reachable");
+
+  /* every QUICK-STRIKE pod inherits the wider box; gapgo keeps its own
+     deliberately narrower minStopPct override, so it is checked on the two
+     keys it does inherit */
+  const quick = STRATS.filter((s) => s.style === "quick");
+  ok(quick.every((st) => st.RANGES.stopAtrMult[1] >= REACH.stopAtrMult && st.RANGES.maxStopPct[1] >= REACH.maxStopPct),
+    "every quick pod can search ATR×12 stops and a 90% clamp");
+  ok(STRATS.filter((s) => ["reclaim", "flag", "igniter", "redgreen"].includes(s.key)).every((st) => covers(st.RANGES)),
+    "the four MGMT_RANGES pods reach the full region including minStopPct 30");
+
+  /* a maxStopPct of 100 puts the stop at zero, which is not a wide stop */
+  ok(RANGES.maxStopPct[1] < 100 && MGMT_RANGES.maxStopPct[1] < 100,
+    "the tuner can never buy a 100% stop — that is no stop at all");
+
+  /* the riders are out of scope: RIDE_RANGES was not widened */
+  const riders = STRATS.filter((s) => s.style === "ride");
+  ok(riders.every((st) => st.RANGES.maxStopPct[1] <= 14 && st.RANGES.stopAtrMult[1] <= 3),
+    "the widening did not leak into the riders' search space");
+
+  /* REACHABILITY, not just declaration: a wide config must actually produce a
+     wide stop. Both copies of the clamp formula are exercised — the inline one
+     in lib/strategy.js#signalAt and stopDist() in lib/strategies.js. */
+  const WIDE = { stopAtrMult: 12, minStopPct: 30, maxStopPct: 90 };
+  {
+    const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, ...WIDE };
+    const bars = [];
+    for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
+    for (let m = 570; m < 575; m++) bars.push(bar(m, 2, 2.1, 1.98, 2.05, 40000));
+    for (let m = 575; m < 605; m++) bars.push(bar(m, 2.05, 2.09, 2.0, 2.06, 30000));
+    bars.push(bar(605, 2.06, 2.2, 2.05, 2.18, 200000));
+    const sig = signalAt(prepSeries(bars, P), bars, bars.length - 1, P);
+    const pct = sig ? ((2.18 - sig.stop) / 2.18) * 100 : 0;
+    ok(!!sig && pct > 12, `lib/strategy.js honours a wide stop config (${pct.toFixed(1)}% > the old 12% ceiling)`);
+  }
+  {
+    const st = STRATS.find((s) => s.key === "redgreen");
+    const mk = () => {
+      const bars = [bar(570, 2.0, 2.01, 1.96, 1.97, 50000)];
+      for (let m = 571; m < 587; m++) bars.push(bar(m, 1.95, 1.96, 1.94, 1.95 + ((m % 2) ? -0.004 : 0.004), 30000));
+      bars.push(bar(587, 1.96, 2.06, 1.95, 2.05, 200000));
+      return bars;
+    };
+    const bars = mk();
+    const P = { ...st.DEFAULTS, ...WIDE };
+    const sig = st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P);
+    const pct = sig ? ((2.05 - sig.stop) / 2.05) * 100 : 0;
+    ok(!!sig && pct > 12, `stopDist honours a wide stop config (${pct.toFixed(1)}% > the old 12% ceiling)`);
+
+    /* ALIASING, new with this change. The two boxes now overlap, so the tuner
+       can draw minStopPct 40 alongside maxStopPct 4. stopDist applies the max
+       clamp LAST, so the clamp wins and the pair silently behaves like a 4%
+       stop. Pinned here so the plateau is on the record rather than a
+       surprise in a tune log. */
+    const inc = { ...st.DEFAULTS, stopAtrMult: 12, minStopPct: 40, maxStopPct: 4 };
+    const sig2 = st.signalAt(prepSeries(bars, inc), bars, bars.length - 1, inc);
+    ok(!!sig2 && approx(sig2.stop, 2.05 * 0.96, 1e-9),
+      "when minStopPct exceeds maxStopPct the max clamp wins (an incoherent pair aliases to the clamp)");
+  }
+}
+
 /* ---- VWAP-loss hysteresis: one dip is noise, two consecutive closes exit ---- */
 {
   const P = { ...DEFAULTS, vwapExit: 1, targetR: 0, timeStopMin: 999, trailAfterR: 99, flattenMin: 1195 };
