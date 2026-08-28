@@ -343,30 +343,38 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
    searched a box that could not contain the answer. These assertions pin the
    new box: what it must reach, what it must still reach, and where it stops. */
 {
-  const { STRATS, MGMT_RANGES } = require("./lib/strategies");
+  const { STRATS, MGMT_RANGES, WIDE_STOP_RANGES } = require("./lib/strategies");
   /* the measured improving region, from the 144-day sweep behind HYP-002 */
   const REACH = { stopAtrMult: 12, minStopPct: 30, maxStopPct: 90 };
   /* the floors the box had before, which must stay reachable */
   const FLOOR = { stopAtrMult: 0.8, minStopPct: 1, maxStopPct: 4 };
+  const STOPS = ["stopAtrMult", "minStopPct", "maxStopPct"];
   const covers = (R) => Object.entries(REACH).every(([k, v]) => R[k] && R[k][1] >= v);
   const keepsFloor = (R) => Object.entries(FLOOR).every(([k, v]) => R[k] && R[k][0] <= v + 1e-9);
+  const pod = (k) => STRATS.find((s) => s.key === k);
+  /* the two pods the sweep was actually run on */
+  const MEASURED = ["redgreen", "reclaim"];
 
-  ok(covers(RANGES) && covers(MGMT_RANGES),
-    "both stop search spaces reach the measured region (ATR×12 / 30% / 90%)");
-  ok(keepsFloor(RANGES) && keepsFloor(MGMT_RANGES),
-    "widening did not raise the floors — tight stops are still reachable");
+  ok(covers(WIDE_STOP_RANGES) && keepsFloor(WIDE_STOP_RANGES),
+    "the wide stop box reaches the measured region (ATR×12 / 30% / 90%) without raising the floors");
+  ok(MEASURED.every((k) => covers(pod(k).RANGES) && keepsFloor(pod(k).RANGES)),
+    "redgreen and reclaim search the wide box");
 
-  /* every QUICK-STRIKE pod inherits the wider box; gapgo keeps its own
-     deliberately narrower minStopPct override, so it is checked on the two
-     keys it does inherit */
-  const quick = STRATS.filter((s) => s.style === "quick");
-  ok(quick.every((st) => st.RANGES.stopAtrMult[1] >= REACH.stopAtrMult && st.RANGES.maxStopPct[1] >= REACH.maxStopPct),
-    "every quick pod can search ATR×12 stops and a 90% clamp");
-  ok(STRATS.filter((s) => ["reclaim", "flag", "igniter", "redgreen"].includes(s.key)).every((st) => covers(st.RANGES)),
-    "the four MGMT_RANGES pods reach the full region including minStopPct 30");
+  /* CONTAINMENT. The wide box is applied per pod, on evidence, and must not be
+     spread into a pod nobody swept. gapgo's wide-stop gain is a cost artefact
+     (+0.14 with costs, -0.16 without), flag and igniter are having their
+     entries replaced, and engine.js:93 promotes on validate alone every night
+     unattended — a wider box on a pod with no edge is how a hollow champion
+     reaches live trading. */
+  ok(STOPS.every((k) => MGMT_RANGES[k][1] === ({ stopAtrMult: 3, minStopPct: 4, maxStopPct: 12 })[k]),
+    "the shared MGMT_RANGES stop box is unchanged — the widening is not global");
+  ok(STOPS.every((k) => RANGES[k][1] === ({ stopAtrMult: 3, minStopPct: 4, maxStopPct: 12 })[k]),
+    "the shared strategy.js stop box is unchanged");
+  ok(["gapgo", "flag", "igniter"].every((k) => !covers(pod(k).RANGES)),
+    "gapgo, flag and igniter did NOT inherit the wide box");
 
   /* a maxStopPct of 100 puts the stop at zero, which is not a wide stop */
-  ok(RANGES.maxStopPct[1] < 100 && MGMT_RANGES.maxStopPct[1] < 100,
+  ok(WIDE_STOP_RANGES.maxStopPct[1] < 100 && MEASURED.every((k) => pod(k).RANGES.maxStopPct[1] < 100),
     "the tuner can never buy a 100% stop — that is no stop at all");
 
   /* the riders are out of scope: RIDE_RANGES was not widened */
