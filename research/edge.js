@@ -56,7 +56,8 @@ for (const st of STRATS) {
   const P = { ...DEFAULTS, ...st.DEFAULTS };
   const sig = HZ.map(() => []);
   const ctl = {}; for (const c of CONTROLS) ctl[c] = HZ.map(() => []);
-  let nSig = 0;
+  const pre = HZ.map(() => []), post = HZ.map(() => []);
+  let nSig = 0, sigTried = 0, sigKept = 0, ctlTried = 0, ctlKept = 0, thinPool = 0;
 
   for (const day of days) {
     for (const sym of Object.keys(day.symbols)) {
@@ -64,34 +65,56 @@ for (const st of STRATS) {
       if (!bars || bars.length < 30) continue;
       const S = prepSeries(bars, P);
 
-      /* eligible minutes, bucketed once per symbol-day per control */
-      const pools = {}; for (const c of CONTROLS) pools[c] = new Map();
-      const hits = [];
+      /* Find the signals first, because every one of them has to be kept OUT
+         of the control pool. Excluding only the bar under test is not enough:
+         on a flood pod the neighbours are mostly signals too -- 78.2% of moon's
+         bucket candidates and 84.2% of gapgo's were other signal bars -- so the
+         "control" was largely the treatment measured again. */
+      const hitSet = new Set();
       for (let i = 0; i < bars.length - 1; i++) {
         const m = bars[i].m;
         if (m < P.entryStartMin || m > P.entryEndMin) continue;
+        if (st.signalAt(S, bars, i, P)) hitSet.add(i);
+      }
+      if (!hitSet.size) continue;
+      const hits = [...hitSet];
+      nSig += hits.length;
+
+      const pools = {}; for (const c of CONTROLS) pools[c] = new Map();
+      for (let i = 0; i < bars.length - 1; i++) {
+        const m = bars[i].m;
+        if (m < P.entryStartMin || m > P.entryEndMin) continue;
+        if (hitSet.has(i)) continue;
         for (const c of CONTROLS) {
           const k = keyFor(m, c);
           if (!pools[c].has(k)) pools[c].set(k, []);
           pools[c].get(k).push(i);
         }
-        if (st.signalAt(S, bars, i, P)) hits.push(i);
       }
-      if (!hits.length) continue;
-      nSig += hits.length;
 
       for (const i of hits) {
-        HZ.forEach((h, k) => { const r = fwd(bars, i, h); if (r != null) sig[k].push(r); });
+        HZ.forEach((h, k) => {
+          if (k === 0) sigTried++;
+          const r = fwd(bars, i, h);
+          if (r != null) { sig[k].push(r); if (k === 0) sigKept++; }
+        });
         for (const c of CONTROLS) {
-          /* draw the control from the signal's OWN bucket — same symbol, same
-             day, same slice of the clock. Exclude the signal bar itself, or
-             the control is partly the thing being tested. */
           const pool = pools[c].get(keyFor(bars[i].m, c));
-          if (!pool || pool.length < 2) continue;
-          let j = i;
-          for (let tries = 0; tries < 8 && j === i; tries++) j = pool[Math.floor(rnd() * pool.length)];
-          if (j === i) continue;
-          HZ.forEach((h, k) => { const r = fwd(bars, j, h); if (r != null) ctl[c][k].push(r); });
+          if (!pool || !pool.length) { if (c === "bucket15") thinPool++; continue; }
+          const j = pool[Math.floor(rnd() * pool.length)];
+          /* A draw BEFORE the signal bar can contain the very burst that later
+             triggers the signal — that is hindsight, not a minute any rule
+             could have chosen. Split it out rather than averaging over it. */
+          const side = j < i ? pre : post;
+          HZ.forEach((h, k) => {
+            if (k === 0 && c === "bucket15") ctlTried++;
+            const r = fwd(bars, j, h);
+            if (r != null) {
+              ctl[c][k].push(r);
+              if (k === 0 && c === "bucket15") ctlKept++;
+              if (c === "bucket15") side[k].push(r);
+            }
+          });
         }
       }
     }
@@ -103,28 +126,36 @@ for (const st of STRATS) {
     + HZ.map(h => `+${h}m`.padStart(10)).join(""));
   console.log(row("signal", sig));
   for (const c of CONTROLS) console.log(row(c, ctl[c]));
-  const s5 = mean(sig[0]), b5 = ctl.bucket15[0].length ? mean(ctl.bucket15[0]) : null;
-  console.log("  " + (b5 == null ? "bucket15 unavailable"
-    : b5 <= 0 ? `vs bucket15: control is negative (${b5.toFixed(1)}), read the columns directly`
-    : `vs bucket15 at +5m: ${(s5 / b5).toFixed(2)}x` + (s5 <= b5 ? "   <== NO EDGE against its own neighbourhood" : "")) + "\n");
+  console.log(row("  ..before", pre) + "   <- hindsight: draw precedes the signal");
+  console.log(row("  ..after", post) + "   <- the comparison a rule could actually make");
+  console.log(`  kept: signal ${sigKept}/${sigTried} (${(100*sigKept/Math.max(1,sigTried)).toFixed(1)}%)`
+    + `  bucket15 control ${ctlKept}/${ctlTried} (${(100*ctlKept/Math.max(1,ctlTried)).toFixed(1)}%)`
+    + `  signals with no usable bucket: ${thinPool}`);
+  const s5 = mean(sig[0]);
+  const a5 = post[0].length ? mean(post[0]) : null;
+  console.log("  " + (a5 == null || a5 <= 0
+    ? "vs after-signal control: unavailable or negative — read the columns"
+    : `vs AFTER-SIGNAL control at +5m: ${(s5 / a5).toFixed(2)}x`
+      + (s5 > a5 ? "   <== beats its own neighbourhood" : "   <== no timing edge")) + "\n");
 }
 console.log(`
-How to read the three controls — they assume different amounts of foreknowledge:
+How to read this — the controls assume different amounts of foreknowledge:
 
-  window    assumes NOTHING. "Be in this name today, pick any minute."
-            Beating it means the signal adds something over no information.
-  hour      assumes you knew the right hour.
-  bucket15  assumes you knew the right 15 minutes, then threw a dart inside it.
-            Beating it means the signal picked the right MINUTE, which is the
-            only part a human or a tuner is actually choosing.
+  window       assumes NOTHING. "Be in this name today, pick any minute."
+               OVERSTATES a clustered signal: it is confounded by time of day.
+  hour         assumes you knew the right hour.
+  bucket15     assumes you knew the right 15 minutes, then threw a dart in it.
+    ..before   UNUSABLE as a benchmark. The bucket is chosen because a signal
+               fires in it, so a draw landing before that signal collects the
+               very burst that later triggers it. No rule could pick that
+               minute; it is hindsight, and every confirmation-based trigger
+               loses to it by construction.
+    ..after    THE ONE THAT MEANS SOMETHING. Same name, same day, same 15
+               minutes, but a minute the signal did not need to see the future
+               to reach. Beating this is a genuine timing edge.
 
-bucket15 is not a strategy you could trade — you cannot know in advance which
-15 minutes will matter. It is a decomposition, and that is what makes it
-useful: it splits a signal's apparent edge into "found the right
-neighbourhood" and "found the right minute inside it."
+Control bars exclude EVERY signal bar, not just the one under test, or on a
+flood pod the control is mostly the treatment measured a second time.
 
-Losing to bucket15 while beating window is a specific, actionable diagnosis. It
-says the screening layer that decides WHICH name and WHEN is carrying the
-result, and the entry trigger that decides the exact bar is adding nothing —
-or, where the signal scores below its own neighbourhood by a wide margin, is
-actively mistimed and buying late into a move that was already underway.`);
+Judge a signal on the ..after row. The blended bucket15 row is reported only
+so the size of the hindsight gap stays visible.`);
