@@ -226,7 +226,16 @@ async function cmdTrade() {
   let alloc = loadAlloc();         // strat key -> risk weight (nightly ensemble)
   let universe = [];               // [{symbol, pct, prevClose}]
   let lastDiscover = 0;
-  const posMeta = {};              // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty}
+  /* THE POSITION BOOK PERSISTS ACROSS RESTARTS. Deploys used to wipe it,
+     so every restart "re-adopted" held positions as generic gapgo trades —
+     a moon runner would lose its ride plan and stall clock, and shutdown
+     even flattened everything. Now each position's full identity (pod,
+     entry, stop, target/ratchet plan, hold clock, exit state) reloads from
+     the Render disk. */
+  const POS_FILE = path.join(STATE, "positions.json");
+  let posMeta = {};                // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty, ...}
+  try { posMeta = JSON.parse(fs.readFileSync(POS_FILE, "utf8")) || {}; log(`restored position book: ${Object.keys(posMeta).length} position(s)`); } catch {}
+  const savePos = () => { try { fs.mkdirSync(STATE, { recursive: true }); fs.writeFileSync(POS_FILE, JSON.stringify(posMeta)); } catch {} };
   const entriesToday = {};         // "strat:sym" -> count
   const cooldownUntil = {};
   const selling = new Set();       // per-symbol guard: fast tick vs slow loop
@@ -306,7 +315,7 @@ async function cmdTrade() {
           selling.delete(sym);
         }
       }
-    } catch (e) {} finally { fastBusy = false; }
+    } catch (e) {} finally { fastBusy = false; savePos(); }
   };
   const fastId = setInterval(fastTick, 1000);
 
@@ -660,11 +669,16 @@ async function cmdTrade() {
       dashStatus.error = "trade-loop error (auto-retrying): " + e.message;
       log("loop error:", e.message);
     }
+    savePos();
     await sleep(15000); /* bar loop: entries + management; the 1s fast tick guards exits */
   }
   clearInterval(fastId);
-  log("shutting down — flattening any open positions");
-  await new PaperBroker(keys).closeAll().catch(() => {});
+  /* restarts (deploys) HAND OFF instead of flattening: the position book is
+     on disk, broker-held RTH stops keep resting server-side, and the next
+     boot resumes every position under its own pod's plan. The 19:55
+     flatten still guarantees no overnights. */
+  savePos();
+  log("shutting down — position book persisted, positions carry to the next boot");
   journal({ kind: "stop" });
 }
 
