@@ -267,7 +267,16 @@ async function cmdTrade() {
   let alloc = loadAlloc();         // strat key -> risk weight (nightly ensemble)
   let universe = [];               // [{symbol, pct, prevClose}]
   let lastDiscover = 0;
-  const posMeta = {};              // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty}
+  /* THE POSITION BOOK PERSISTS ACROSS RESTARTS. Deploys used to wipe it,
+     so every restart "re-adopted" held positions as generic gapgo trades —
+     a moon runner would lose its ride plan and stall clock, and shutdown
+     even flattened everything. Now each position's full identity (pod,
+     entry, stop, target/ratchet plan, hold clock, exit state) reloads from
+     the Render disk. */
+  const POS_FILE = path.join(STATE, "positions.json");
+  let posMeta = {};                // sym -> {strat, entry, stop, risk, hwm, barsHeld, qty, ...}
+  try { posMeta = JSON.parse(fs.readFileSync(POS_FILE, "utf8")) || {}; log(`restored position book: ${Object.keys(posMeta).length} position(s)`); } catch {}
+  const savePos = () => { try { fs.mkdirSync(STATE, { recursive: true }); fs.writeFileSync(POS_FILE, JSON.stringify(posMeta)); } catch {} };
   const entriesToday = {};         // "strat:sym" -> count
   const cooldownUntil = {};
   const selling = new Set();       // per-symbol guard: fast tick vs slow loop
@@ -310,6 +319,10 @@ async function cmdTrade() {
         if (p <= meta.stop) {
           /* a resting RTH broker stop at this level fills server-side */
           if (!ext2 && meta.brokerStop != null && meta.stop <= meta.brokerStop + 1e-9) continue;
+          /* FLICKER IMMUNITY: one odd-lot print below the stop is noise on
+             these names — demand the breach on two consecutive 1s ticks */
+          meta.breach = (meta.breach || 0) + 1;
+          if (meta.breach < 2) continue;
           selling.add(sym);
           log(`FAST EXIT [${meta.strat}] ${sym}: live ${p} <= stop ${meta.stop.toFixed(4)}`);
           try {
@@ -321,6 +334,8 @@ async function cmdTrade() {
             meta.exiting = { reason: "stop", t: Date.now(), tries: 0, pnl: +(((p - meta.entry) * meta.qty).toFixed(2)) };
           } catch (e) { log("fast exit failed:", sym, e.message); }
           selling.delete(sym);
+        } else if (meta.breach) {
+          meta.breach = 0; /* the print recovered — it was a flicker */
         } else if (!meta.scaled && meta.target && p >= meta.target && P.scaleOutPct < 100) {
           const q = Math.min(meta.qty, Math.max(1, Math.round(meta.qty * P.scaleOutPct / 100)));
           selling.add(sym);
@@ -341,7 +356,7 @@ async function cmdTrade() {
           selling.delete(sym);
         }
       }
-    } catch (e) {} finally { fastBusy = false; }
+    } catch (e) {} finally { fastBusy = false; savePos(); }
   };
   const fastId = setInterval(fastTick, 1000);
 
@@ -575,11 +590,26 @@ async function cmdTrade() {
             brokerStop: null, risk: Number(p.avg_entry_price) * P0.minStopPct / 100,
             target: Number(p.avg_entry_price) * (1 + P0.targetR * P0.minStopPct / 100),
             hwm: Number(p.avg_entry_price), barsHeld: 0, qty: qtyNow, scaled: false,
-            filled: true, placedAt: Date.now(), exiting: null,
+            filled: true, rebased: true, placedAt: Date.now(), exiting: null,
           });
           const P = Ps[meta.strat] || Ps.gapgo; /* this pod's own management rules */
           meta.qty = qtyNow;
           meta.filled = true;
+          /* REBASE ON FILL: the stop was computed off the signal bar's
+             close, but the marketable order fills higher — keep the
+             INTENDED risk distance from the actual fill, or the effective
+             stop is tighter than designed and gets clipped by noise */
+          if (!meta.rebased) {
+            meta.rebased = true;
+            const fillPx = Number(p.avg_entry_price);
+            if (fillPx > 0 && Math.abs(fillPx - meta.entry) / meta.entry < 0.2) {
+              const shift = fillPx - meta.entry;
+              meta.entry = fillPx;
+              meta.stop += shift;
+              if (meta.target != null) meta.target += shift;
+              meta.hwm = Math.max(meta.hwm, fillPx);
+            }
+          }
           const price = bars[bars.length - 1].c;
           const submitSell = async (q, px2) => {
             await broker.cancelOrders(p.symbol).catch(() => {});
@@ -618,6 +648,11 @@ async function cmdTrade() {
             } catch (e) { log("scale-out failed:", p.symbol, e.message); }
             continue;
           }
+          /* barsHeld must mean MINUTES: exitCheck runs every 15s live (vs
+             once per 1-min bar in backtests), so wall-clock is the truth —
+             otherwise time stops fire 4x early for quick pods and rider
+             stall exits drift */
+          meta.barsHeld = Math.floor((Date.now() - (meta.placedAt || Date.now())) / 60000);
           const S = prepSeries(bars, P);
           const ex = exitCheck(S, bars, bars.length - 1, meta, P);
           if (!ex) continue;
@@ -660,7 +695,7 @@ async function cmdTrade() {
               try {
                 if (ext) await broker.buyLimitExt(u.symbol, qty, px * 1.01); /* marketable limit; stop engine-managed off-RTH */
                 else await broker.buyBracket(u.symbol, qty, sig.stop, null); /* OTO stop; the scale-out is engine-managed */
-                posMeta[u.symbol] = { strat: st.key, entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false, filled: false, placedAt: Date.now(), exiting: null };
+                posMeta[u.symbol] = { strat: st.key, entry: px, stop: sig.stop, brokerStop: ext ? null : sig.stop, risk: sig.risk, target, hwm: px, barsHeld: 0, qty, scaled: false, filled: false, rebased: false, placedAt: Date.now(), exiting: null };
                 entriesToday[st.key + ":" + u.symbol] = (entriesToday[st.key + ":" + u.symbol] || 0) + 1;
                 openByStrat[st.key] = (openByStrat[st.key] || 0) + 1;
                 journal({ kind: "entry", sym: u.symbol, strat: st.key, qty, px, stop: sig.stop, target });
@@ -675,11 +710,16 @@ async function cmdTrade() {
       dashStatus.error = "trade-loop error (auto-retrying): " + e.message;
       log("loop error:", e.message);
     }
+    savePos();
     await sleep(15000); /* bar loop: entries + management; the 1s fast tick guards exits */
   }
   clearInterval(fastId);
-  log("shutting down — flattening any open positions");
-  await new PaperBroker(keys).closeAll().catch(() => {});
+  /* restarts (deploys) HAND OFF instead of flattening: the position book is
+     on disk, broker-held RTH stops keep resting server-side, and the next
+     boot resumes every position under its own pod's plan. The 19:55
+     flatten still guarantees no overnights. */
+  savePos();
+  log("shutting down — position book persisted, positions carry to the next boot");
   journal({ kind: "stop" });
 }
 
