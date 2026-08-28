@@ -134,6 +134,47 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   const b = runBacktest(days, res.params);
   ok(b.metrics.trades > 0, `tuned strategy still trades (${b.metrics.trades} trades over ${days.length} synthetic days)`);
 
+  /* ---- the account can never go short ---- */
+  {
+    const { PaperBroker } = require("./lib/broker");
+    const b = new PaperBroker({ id: "x", secret: "y" });
+    const sent = [];
+    b.req = async (m, path, body) => { sent.push(body); return { id: "stub" }; };
+
+    /* before any position fetch the guard cannot clamp and must not block exits */
+    ok(b.sellableQty("AAA", 100) === 100, "with no position book yet, a sell passes through unclamped");
+
+    b.held = new Map([["AAA", 500], ["BBB", -300], ["CCC", 0]]);
+    ok(b.sellableQty("AAA", 800) === 500, "a sell larger than the holding is clamped to the holding");
+    ok(b.sellableQty("AAA", 200) === 200, "a sell inside the holding is untouched");
+    ok(b.sellableQty("BBB", 300) === 0, "a symbol already short can never be sold again");
+    ok(b.sellableQty("CCC", 50) === 0, "a flat symbol can never be sold");
+    ok(b.sellableQty("ZZZ", 50) === 0, "a symbol absent from the book can never be sold");
+
+    let threw = false;
+    try { b.sellMarket("BBB", 300); } catch { threw = true; }
+    ok(threw, "sellMarket THROWS rather than adding to an existing short");
+    threw = false;
+    try { b.sellStop("ZZZ", 10, 1.5); } catch { threw = true; }
+    ok(threw, "a resting stop cannot be armed for shares the account does not hold");
+
+    /* the cache decrements on every accepted sell, so two exit paths racing
+       inside one 15s refresh window cannot between them oversell */
+    b.held = new Map([["AAA", 500]]);
+    b.sellMarket("AAA", 400);
+    ok(b.held.get("AAA") === 100, "an accepted sell decrements the cached holding");
+    b.sellMarket("AAA", 400);
+    ok(sent[sent.length - 1].qty === "100", "a racing second sell is clamped to the 100 shares left, not 400");
+    threw = false;
+    try { b.sellMarket("AAA", 100); } catch { threw = true; }
+    ok(threw, "once flat, further sells are refused outright");
+
+    /* sellStop must NOT decrement — nothing has been sold yet */
+    b.held = new Map([["AAA", 500]]);
+    b.sellStop("AAA", 500, 1.0);
+    ok(b.held.get("AAA") === 500, "arming a stop does not decrement the holding — nothing sold yet");
+  }
+
   /* ---- the participation cap: you cannot buy shares that did not trade ---- */
   {
     const { runDay } = require("./lib/backtest");

@@ -442,8 +442,22 @@ async function cmdTrade() {
       const flattenAll = async (poss, reason) => {
         for (const p of poss) {
           await broker.cancelOrders(p.symbol).catch(() => {});
-          const q = Math.abs(Number(p.qty));
+          const raw = Number(p.qty);
+          const q = Math.abs(raw);
           const px = Number(p.current_price) || Number(p.avg_entry_price);
+          /* A SHORT IS CLOSED BY BUYING. This loop used to take Math.abs(qty)
+             and sell it, so a -11,072 share position came out of the flatten
+             window at -22,144. Cover instead, and never touch the sell path. */
+          if (raw < 0) {
+            log(`COVERING SHORT ${p.symbol} x${q} — this account never holds shorts`);
+            try {
+              if (ext) await broker.buyLimitExt(p.symbol, q, px * 1.02);
+              else await broker.closePosition(p.symbol);
+              journal({ kind: "exit", sym: p.symbol, strat: (posMeta[p.symbol] || {}).strat, reason: "cover", pnl: Number(p.unrealized_pl) || 0 });
+            } catch (e) { log("cover failed:", p.symbol, e.message); }
+            delete posMeta[p.symbol];
+            continue;
+          }
           /* an illiquid name (e.g. a stranded warrant) may not fill the
              first limit: journal the exit ONCE, and price each retry more
              aggressively instead of spamming identical orders + rows */
@@ -581,7 +595,9 @@ async function cmdTrade() {
                 log(`DEAD-TAPE LIQUIDATION ${p.symbol}: no prints all session — market sell`);
                 try {
                   await broker.cancelOrders(p.symbol).catch(() => {});
-                  await broker.sellMarket(p.symbol, Math.abs(Number(p.qty)));
+                  /* closePosition is side-aware: it covers a short and sells a
+                     long, so a dead-tape corpse can never become a short */
+                  await broker.closePosition(p.symbol);
                   journal({ kind: "exit", sym: p.symbol, strat: m0.strat, reason: "deadtape", pnl: Number(p.unrealized_pl) || 0 });
                   delete posMeta[p.symbol];
                 } catch (e) { log("dead-tape sell failed:", p.symbol, e.message); }
