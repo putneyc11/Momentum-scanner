@@ -21,6 +21,33 @@ here that reproduces it, that claim is not checkable and should not be graded.
 | `falsifier2.js` | Is a stop-width gain real, or just fewer round trips paying less slippage? Re-runs at `slipBps 0`, where there is no cost to save. |
 | `slip-sweep.js` | How much of a result survives a realistic slippage assumption? Also prints the price distribution of the traded tape. |
 
+## A defect this file already had, and what it cost
+
+`edge.js` originally stepped forward `h` **array positions** to measure a
+forward return. Alpaca emits a 1-minute bar only when a trade printed, so
+illiquid names and halts leave holes, and `h` positions is not `h` minutes.
+
+It broke asymmetrically, which is the dangerous kind. Signals fire on
+volume-surge bars that sit in dense tape; random draws land anywhere, including
+sparse tape. At a nominal 5-bar horizon:
+
+```
+                signal entries    random entries
+surge             5.5 minutes      10.6 minutes
+moon              7.3 minutes      10.4 minutes
+redgreen          7.3 minutes       9.3 minutes
+```
+
+The baseline was collecting up to twice the drift of the thing it was grading.
+Horizons are now wall-clock minutes from each bar's `m`. The conclusion did not
+change — redgreen's advantage went **up**, from 6.6x to 8.0x, and the five
+worse-than-random pods stayed worse — but it could have, and nothing in the
+output would have said so.
+
+The lesson worth keeping: **the instrument gets audited before the result.**
+A baseline that is quietly measured over a different horizon than the treatment
+looks exactly like a real finding.
+
 ## Two traps these scripts exist to catch
 
 **Gross profitability proves nothing.** At `slipBps 0`, gapgo scores PF 1.16 on
