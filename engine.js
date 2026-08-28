@@ -42,7 +42,7 @@ const { PaperBroker } = require("./lib/broker");
 const { prepSeries, exitCheck, entryViable } = require("./lib/strategy");
 const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
-const { tune } = require("./lib/tune");
+const { tune, splitDays } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 
 const ROOT = __dirname;
@@ -87,6 +87,8 @@ function ensembleTune(days, iters, seedBase) {
     const siblings = STRATS.filter((o) => o.key !== st.key).map((o) => champs[o.key]);
     const res = tune(days, champs[st.key], iters, (seedBase + st.key.length * 7919) % 100000,
       { ranges: st.RANGES, signalFn: st.signalAt, seeds: siblings });
+    /* Accept on the FROZEN validate bar, never on the holdout — the moment a
+       save decision reads `test`, the holdout stops being unbiased. */
     const improved = res.bestScore.valid != null && res.baseScore.valid != null
       ? res.bestScore.valid > res.baseScore.valid
       : res.bestScore.train > res.baseScore.train;
@@ -97,7 +99,12 @@ function ensembleTune(days, iters, seedBase) {
       fs.appendFileSync(TUNE_LOG, JSON.stringify({ t: new Date().toISOString(), strat: st.key, days: days.length, base: res.baseScore, best: res.bestScore, params: res.params }) + "\n");
     }
     scores[st.key] = res.bestScore.valid != null ? res.bestScore.valid : res.bestScore.train;
-    log(`tune ${st.key}: base ${JSON.stringify(res.baseScore)} best ${JSON.stringify(res.bestScore)}${improved ? "  → saved" : ""}`);
+    /* The holdout delta is the honest readout: if validate climbs while test
+       does not, the search found the validation split, not an edge. */
+    const holdout = res.bestScore.test != null
+      ? `  holdout ${res.baseScore.test} → ${res.bestScore.test} (${res.bestScore.test >= res.baseScore.test ? "held" : "DID NOT HOLD"})`
+      : "";
+    log(`tune ${st.key}: ${res.accepted}/${res.candidates} accepted  base ${JSON.stringify(res.baseScore)} best ${JSON.stringify(res.bestScore)}${holdout}${improved ? "  → saved" : ""}`);
   }
   /* validated scores -> risk weights in [0.4, 1.6], mean ~1 — losers keep a
      floor so they can still explore and recover */
@@ -199,7 +206,8 @@ function cmdBacktest() {
 function cmdTune() {
   const days = loadDaysOrSynth();
   const iters = arg("iters", 120);
-  log(`ensemble tune: ${STRATS.length} pods × ${iters} iterations, walk-forward 70/30 over ${days.length} days…`);
+  const sp = splitDays(days);
+  log(`ensemble tune: ${STRATS.length} pods × ${iters} iterations over ${days.length} days — train=${sp.train.length} validate=${sp.valid.length} holdout=${sp.test.length}…`);
   ensembleTune(days, iters, arg("seed", Date.now() % 100000));
 }
 

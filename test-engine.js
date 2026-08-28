@@ -4,7 +4,7 @@
 const I = require("./lib/indicators");
 const { DEFAULTS, RANGES, prepSeries, signalAt, exitCheck, entryViable } = require("./lib/strategy");
 const { runBacktest, runDay } = require("./lib/backtest");
-const { tune, score } = require("./lib/tune");
+const { tune, score, splitDays, MIN_HOLDOUT_DAYS } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 const { PaperBroker, PAPER_URL } = require("./lib/broker");
 
@@ -133,6 +133,30 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(true, "tuned params stay inside their declared ranges");
   const b = runBacktest(days, res.params);
   ok(b.metrics.trades > 0, `tuned strategy still trades (${b.metrics.trades} trades over ${days.length} synthetic days)`);
+
+  /* ---- the split is 60/20/20, chronological, and disjoint ---- */
+  const sp = splitDays(days);
+  ok(sp.train.length + sp.valid.length + sp.test.length === days.length, "the three splits partition the library exactly");
+  ok(sp.train.length === 24 && sp.valid.length === 8 && sp.test.length === 8, `40 days splits 60/20/20 (got ${sp.train.length}/${sp.valid.length}/${sp.test.length})`);
+  ok(sp.train[sp.train.length - 1].date < sp.valid[0].date && sp.valid[sp.valid.length - 1].date < sp.test[0].date,
+     "splits are chronological — train precedes validate precedes holdout");
+  const short = splitDays(days.slice(0, MIN_HOLDOUT_DAYS - 1));
+  ok(short.test.length === 0, "below the holdout floor the tuner falls back to 70/30 with no holdout");
+
+  /* ---- the validation bar is FROZEN: it never ratchets with acceptances ---- */
+  ok(res.validBar === res.baseScore.valid,
+     `the acceptance bar equals the BASE champion's validate score and is never raised (${res.validBar})`);
+  for (const h of res.history.slice(1))
+    if (h.accepted && !(h.valid >= res.validBar)) ok(false, `iter ${h.iter} accepted at valid ${h.valid} below the frozen bar ${res.validBar}`);
+  ok(true, `every acceptance cleared the frozen bar (${res.accepted}/${res.candidates} candidates accepted)`);
+
+  /* ---- the holdout is reported but never gates anything ---- */
+  ok(res.bestScore.test != null && res.baseScore.test != null, "a holdout score is reported for base and champion");
+  const rerun = tune(days, DEFAULTS, 60, 3);
+  ok(rerun.bestScore.test === res.bestScore.test && JSON.stringify(rerun.params) === JSON.stringify(res.params),
+     "the tuner is deterministic for a given seed, so the holdout comparison is repeatable");
+  const noTest = tune(days.slice(0, MIN_HOLDOUT_DAYS - 1), DEFAULTS, 20, 3);
+  ok(noTest.bestScore.test === null, "with no holdout split the test score is null rather than borrowed from validate");
 }
 
 /* ---- the five-pod ensemble ---- */
