@@ -35,6 +35,41 @@ You merge, by hand, after 20:00 ET.
 
 ---
 
+## The merge gate — not optional
+
+Before any change to `lib/` is proposed for merge, whoever made it runs:
+
+```bash
+node engine.js test                       # must be 0 failed
+node engine.js regress --base <the ref you branched from>
+```
+
+`regress` replays every pod over the recorded days twice — once with the
+strategy code at `--base`, once with the working tree — and prints a
+before/after profit-factor table. It exits 1 if any pod lost more than 0.03
+profit factor. **Paste that table into the proposal.** A change with no table
+is not reviewable and does not get merged.
+
+This exists because of a real failure on 2026-08-28. The rider stall exit was
+a correct fix for a real problem — a dead position was holding a slot all day
+— and it quietly took moon from profit factor 1.24 to 1.02. It went unnoticed
+for eight hours, because nothing compared before to after. Agents will produce
+that failure faster than people do.
+
+Two things the gate deliberately does not do:
+
+- It does not read `state/params`. Saved champions differ per machine and move
+  with every tune, so scoring against them would make the verdict
+  irreproducible. It compares `DEFAULTS`, which are in git.
+- It does not block an improvement, and it does not block a pod being added.
+
+A FAIL is not automatically a veto. The participation cap fails this gate
+against its own parent, and it should — it removed fictional fills, so the
+honest number is lower. The rule is that a FAIL must be **explained in the
+proposal**, not silently carried.
+
+---
+
 ## 1. Grok — the daily research pass
 
 This is the one that runs **every day**, and it is the only role that needs

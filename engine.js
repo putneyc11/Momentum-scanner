@@ -14,6 +14,7 @@
      node engine.js backtest [--synth N] backtest every pod on recorded days
      node engine.js tune [--synth N] [--iters N]   run the ensemble tune now
      node engine.js report               journal + per-pod + tuning summary
+     node engine.js regress --base <ref> [--maxDrop N]  did this change cost a pod its edge?
      node engine.js test                 run the unit tests
 
    Keys (Alpaca PAPER account) via env:
@@ -42,6 +43,7 @@ const { PaperBroker } = require("./lib/broker");
 const { prepSeries, exitCheck, entryViable, MAX_BAR_PARTICIPATION } = require("./lib/strategy");
 const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
+const R = require("./lib/regress");
 const { tune, splitDays } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 
@@ -209,6 +211,26 @@ function cmdTune() {
   const sp = splitDays(days);
   log(`ensemble tune: ${STRATS.length} pods × ${iters} iterations over ${days.length} days — train=${sp.train.length} validate=${sp.valid.length} holdout=${sp.test.length}…`);
   ensembleTune(days, iters, arg("seed", Date.now() % 100000));
+}
+
+/* The merge gate. Replays every pod at --base and at the working tree and
+   fails if any pod lost edge — the check that would have caught the rider
+   stall exit costing moon 0.22 profit factor on 2026-08-28. */
+function cmdRegress() {
+  const baseRef = argStr("base", "");
+  if (!baseRef) return log("usage: node engine.js regress --base <git-ref> [--maxDrop 0.03]");
+  const days = loadDaysOrSynth();
+  if (!days.length) return log("no recorded days — nothing to compare over");
+  let res;
+  try {
+    res = R.compare(days, baseRef, { maxDrop: arg("maxDrop", 0.03) });
+  } catch (e) {
+    log(e.message);
+    process.exitCode = 2;
+    return;
+  }
+  console.log("\n" + R.formatTable(res, baseRef));
+  if (res.failed) process.exitCode = 1;
 }
 
 function cmdReport() {
@@ -755,6 +777,6 @@ async function cmdTrade() {
 const cmd = process.argv[2] || "report";
 ({
   scan: cmdScan, trade: cmdTrade, backtest: cmdBacktest, tune: cmdTune, report: cmdReport,
-  backfill: cmdBackfill,
+  backfill: cmdBackfill, regress: cmdRegress,
   test: () => require("./test-engine.js"),
-}[cmd] || (() => console.log("commands: trade | scan | backfill | backtest | tune | report | test")))();
+}[cmd] || (() => console.log("commands: trade | scan | backfill | backtest | tune | regress | report | test")))();

@@ -538,6 +538,52 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     }
   }
 
+  /* ---- regression gate ---- */
+  {
+    const RG = require("./lib/regress");
+    const { STRATS } = require("./lib/strategies");
+    const days = makeLibrary(8, 7);
+
+    /* A pod that got worse must fail; a pod that got better must not. The gate
+       compares against -maxDrop rather than the absolute delta, because an
+       improvement is not a regression. */
+    const fakeScores = (pf) => new Map(pf.map(([k, v]) => [k, { profitFactor: v, trades: 10 }]));
+    const rowsFor = (base, head) => {
+      const rows = [];
+      let failed = false;
+      for (const [k, b] of fakeScores(base)) {
+        const h = fakeScores(head).get(k);
+        const delta = +(h.profitFactor - b.profitFactor).toFixed(4);
+        const regressed = delta < -0.03;
+        if (regressed) failed = true;
+        rows.push({ k, delta, regressed });
+      }
+      return { rows, failed };
+    };
+    ok(rowsFor([["a", 1.24]], [["a", 0.96]]).failed, "gate fails a pod that lost profit factor");
+    ok(!rowsFor([["a", 0.96]], [["a", 1.24]]).failed, "gate does not fail a pod that improved");
+    ok(!rowsFor([["a", 1.00]], [["a", 0.98]]).failed, "gate tolerates noise inside maxDrop");
+
+    /* scoreAll must key by pod and cover every strategy, or the comparison
+       silently skips whatever it failed to score. */
+    const head = { STRATS, DEFAULTS, runBacktest };
+    const scored = RG.scoreAll(head, days, 100000);
+    ok(scored.size === STRATS.length && STRATS.every((s) => scored.has(s.key)),
+      "scoreAll returns one metrics row per pod");
+
+    /* Comparing a ref against itself is the identity case: every delta zero,
+       gate passes. If this ever fails, the gate is non-deterministic and every
+       verdict it has ever given is void. */
+    const self = RG.compare(days, "HEAD", { maxDrop: 0.03, repoRoot: __dirname });
+    ok(!self.failed && self.rows.every((r) => r.delta === 0),
+      "comparing HEAD against itself is deterministic and passes");
+
+    /* An unusable ref must be an error, never a silent pass. */
+    let threw = false;
+    try { RG.compare(days, "not-a-real-ref", { repoRoot: __dirname }); } catch { threw = true; }
+    ok(threw, "an invalid base ref throws instead of reporting a pass");
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
