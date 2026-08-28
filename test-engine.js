@@ -49,7 +49,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 
 /* ---- backtest mechanics ---- */
 {
-  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 100, flattenMin: 955 };
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBpsOverride: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 100, flattenMin: 955 };
   const mk = (post) => {
     const bars = [];
     for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
@@ -95,7 +95,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
 
 /* ---- scale-out: 85% banked at the target, runner rides with break-even floor ---- */
 {
-  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBps: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 85, reentryLimit: 1, flattenMin: 955 };
+  const P = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBpsOverride: 0, riskPct: 1, targetR: 2, vwapExit: 0, timeStopMin: 999, entryEndMin: 780, entryStartMin: 570, scaleOutPct: 85, reentryLimit: 1, flattenMin: 955 };
   const bars = [];
   for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
   for (let m = 570; m < 575; m++) bars.push(bar(m, 2, 2.1, 1.98, 2.05, 40000));
@@ -571,12 +571,23 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     ok(scored.size === STRATS.length && STRATS.every((s) => scored.has(s.key)),
       "scoreAll returns one metrics row per pod");
 
-    /* Comparing a ref against itself is the identity case: every delta zero,
-       gate passes. If this ever fails, the gate is non-deterministic and every
-       verdict it has ever given is void. */
-    const self = RG.compare(days, "HEAD", { maxDrop: 0.03, repoRoot: __dirname });
-    ok(!self.failed && self.rows.every((r) => r.delta === 0),
-      "comparing HEAD against itself is deterministic and passes");
+    /* Scoring the same code twice must give identical numbers. If this ever
+       fails the gate is non-deterministic and every verdict it has given is
+       void. Deliberately NOT written as compare(days, "HEAD"): that scores the
+       working tree against HEAD, so it would fail for anyone with uncommitted
+       work — which is everyone who is mid-change and running the tests. */
+    const a = RG.scoreAll(head, days, 100000);
+    const b = RG.scoreAll(head, days, 100000);
+    ok([...a.keys()].every((k) => a.get(k).profitFactor === b.get(k).profitFactor
+      && a.get(k).trades === b.get(k).trades),
+      "scoring the same code twice is deterministic");
+
+    /* And the loader must reproduce a historical ref byte-for-byte in its
+       scores, or "base" means nothing. Load the same ref twice, score both. */
+    const l1 = RG.loadLibAt("HEAD", __dirname), l2 = RG.loadLibAt("HEAD", __dirname);
+    const s1 = RG.scoreAll(l1, days, 100000), s2 = RG.scoreAll(l2, days, 100000);
+    ok([...s1.keys()].every((k) => s1.get(k).profitFactor === s2.get(k).profitFactor),
+      "loading and scoring the same ref twice is deterministic");
 
     /* An unusable ref must be an error, never a silent pass. */
     let threw = false;

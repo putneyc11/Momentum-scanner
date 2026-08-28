@@ -15,7 +15,7 @@ for (const key of ["redgreen", "gapgo", "reclaim"]) {
   let base20 = null, base0 = null;
   for (const [stopAtrMult, minStopPct, maxStopPct] of GRID) {
     const mk = (slipBps) => runBacktest(days,
-      { ...DEFAULTS, ...st.DEFAULTS, stopAtrMult, minStopPct, maxStopPct, slipBps },
+      { ...DEFAULTS, ...st.DEFAULTS, stopAtrMult, minStopPct, maxStopPct, slipBpsOverride: slipBps },
       100000, st.signalAt).metrics.profitFactor;
     const a = mk(20), b = mk(0);
     if (base20 == null) { base20 = a; base0 = b; }

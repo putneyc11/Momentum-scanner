@@ -24,7 +24,7 @@ const LEVELS = [20, 50, 100];
 console.log("\npod        " + LEVELS.map(l => `PF@${l}bps`.padStart(11)).join(""));
 for (const st of STRATS) {
   const row = LEVELS.map(bps => {
-    const P = { ...DEFAULTS, ...st.DEFAULTS, slipBps: bps };
+    const P = { ...DEFAULTS, ...st.DEFAULTS, slipBpsOverride: bps };
     const { metrics } = runBacktest(days, P, 100000, st.signalAt);
     return String(metrics.profitFactor).padStart(11);
   });
