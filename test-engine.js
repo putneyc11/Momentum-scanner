@@ -310,6 +310,79 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     const red = bars.slice(0, -1); red.push(bar(617, 2.04, 2.05, 2.0, 2.01, 150000));
     ok(st.signalAt(prepSeries(red, P), red, red.length - 1, P) === null, "igniter: a red surge bar does NOT fire");
   }
+  /* HYP-003: surge's First Expansion entry. Buys the START of the volume event
+     rather than the last print of a squeeze, so every gate that defines "first"
+     and "not yet extended" gets its own assertion. */
+  {
+    const st = get("surge"); const P = st.DEFAULTS;
+    /* 20 flat alternating bars: avg10 ~30k, vwap ~2.00, mid-range RSI */
+    const base = () => {
+      const bars = [];
+      for (let m = 600; m < 620; m++) bars.push(bar(m, 2, 2.01, 1.99, 2.0 + ((m % 2) ? -0.005 : 0.005), 30000));
+      return bars;
+    };
+    const fire = (bars) => st.signalAt(prepSeries(bars, P), bars, bars.length - 1, P);
+
+    const good = base();
+    good.push(bar(620, 2.00, 2.06, 1.995, 2.05, 150000));
+    ok(!!fire(good), "first-exp: a green volume surge breaking the 5-bar high near VWAP fires");
+
+    const red = base();
+    red.push(bar(620, 2.05, 2.06, 1.99, 2.00, 150000));
+    ok(fire(red) === null, "first-exp: a RED expansion bar does not fire");
+
+    const quiet = base();
+    quiet.push(bar(620, 2.00, 2.06, 1.995, 2.05, 60000));       // < 3.5x avg10
+    ok(fire(quiet) === null, "first-exp: without the volume surge it does not fire");
+
+    const noBreak = base();
+    noBreak.push(bar(620, 2.00, 2.008, 1.995, 2.005, 150000));  // under the 5-bar high 2.01
+    ok(fire(noBreak) === null, "first-exp: a surge that does NOT clear the 5-bar high is not an expansion");
+
+    /* THE "FIRST" CONDITION — the whole point of the hypothesis. If the prior
+       bar was already a green volume surge, this is a continuation and the move
+       being ridden has already happened. */
+    const second = base();
+    second[second.length - 1] = bar(619, 1.99, 2.02, 1.985, 2.015, 150000);   // prior bar IS a green surge
+    second.push(bar(620, 2.015, 2.07, 2.01, 2.06, 150000));
+    ok(fire(second) === null, "first-exp: a continuation bar does NOT fire — only the FIRST bar of the expansion");
+    /* and the same bar in isolation would have fired, so the rejection is the
+       prior-bar rule and not some other gate */
+    const alone = base();
+    alone.push(bar(620, 2.00, 2.07, 1.995, 2.06, 150000));
+    ok(!!fire(alone), "first-exp: that same bar fires when it is NOT preceded by a surge");
+
+    /* still near value: an open already extended above VWAP is excluded, but an
+       open BELOW VWAP is fine — the gate is deliberately one-sided */
+    const extended = base();
+    extended.push(bar(620, 2.10, 2.20, 2.09, 2.18, 150000));    // opens ~5% over vwap 2.00
+    ok(fire(extended) === null, "first-exp: an open extended >2% above VWAP does not fire");
+    const under = base();
+    under.push(bar(620, 1.96, 2.06, 1.955, 2.05, 150000));      // opens BELOW vwap
+    ok(!!under && !!fire(under), "first-exp: an open below VWAP is still near value and fires");
+
+    /* RSI IS PINNED AT 80 AND THE TUNER CANNOT REACH IT. surge's own rsiMax
+       default is 90, so a bar at RSI 85 would pass P.rsiMax and must still be
+       rejected — otherwise the entry is not the one that was measured. */
+    {
+      const bars = base();
+      bars.push(bar(620, 2.00, 2.06, 1.995, 2.05, 150000));
+      const S = prepSeries(bars, P);
+      const i = bars.length - 1;
+      S.rsi[i] = 75;
+      ok(!!st.signalAt(S, bars, i, P), "first-exp: RSI 75 fires");
+      S.rsi[i] = 85;
+      ok(P.rsiMax === 90 && st.signalAt(S, bars, i, P) === null,
+        "first-exp: RSI 85 is rejected even though the pod's own rsiMax is 90 — the 80 bound is pinned");
+    }
+
+    /* igniter must be untouched: it still owns the 3-bar climax entry */
+    ok(get("igniter").signalAt !== st.signalAt,
+      "surge and igniter no longer share an entry — igniterSignal is still igniter's");
+    /* invariant #4 survives the swap */
+    ok(!("targetR" in st.RANGES) && !("scaleOutPct" in st.RANGES) && st.DEFAULTS.targetR === 0,
+      "surge is still a rider: no target, no scale-out, after the entry change");
+  }
   /* Red-to-Green: first cross back above the 9:30 open */
   {
     const st = get("redgreen"); const P = st.DEFAULTS;
