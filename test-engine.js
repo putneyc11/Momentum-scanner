@@ -233,6 +233,24 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   ok(inRange, "cross-pollinated params stay inside the pod's declared ranges");
 }
 
+/* ---- VWAP-loss hysteresis: one dip is noise, two consecutive closes exit ---- */
+{
+  const P = { ...DEFAULTS, vwapExit: 1, targetR: 0, timeStopMin: 999, trailAfterR: 99, flattenMin: 1195 };
+  const bars = [];
+  for (let m = 600; m < 615; m++) bars.push(bar(m, 2, 2.01, 1.99, 2.0, 30000));
+  bars.push(bar(615, 2.0, 2.0, 1.97, 1.98, 30000));  // ONE close under VWAP
+  bars.push(bar(616, 1.98, 2.03, 1.98, 2.02, 30000)); // recovers
+  bars.push(bar(617, 2.02, 2.02, 1.96, 1.97, 30000)); // below again (1st consecutive)
+  bars.push(bar(618, 1.97, 1.98, 1.95, 1.96, 30000)); // below again (2nd consecutive)
+  const S = prepSeries(bars, P);
+  const pos = { entry: 2.0, stop: 1.5, risk: 0.2, hwm: 2.0, barsHeld: 0 };
+  const results = [];
+  for (let i = 14; i < bars.length; i++) results.push(exitCheck(S, bars, i, pos, P));
+  ok(results[1] === null, "hysteresis: a single close under VWAP does NOT exit (was instant churn)");
+  ok(results[3] === null, "hysteresis: the first of two below-VWAP closes still holds");
+  ok(results[4] && results[4].reason === "vwap", "two consecutive closes under VWAP exit on trend loss");
+}
+
 /* ---- churn guard: an entry the exit engine would instantly close ---- */
 {
   ok(entryViable({ vwap: [2.5] }, [{ c: 2.6 }], 0, { vwapExit: 1 }), "entry above VWAP is viable with vwapExit armed");
