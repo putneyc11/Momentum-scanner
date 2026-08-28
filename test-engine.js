@@ -134,6 +134,44 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   const b = runBacktest(days, res.params);
   ok(b.metrics.trades > 0, `tuned strategy still trades (${b.metrics.trades} trades over ${days.length} synthetic days)`);
 
+  /* ---- the participation cap: you cannot buy shares that did not trade ---- */
+  {
+    const { runDay } = require("./lib/backtest");
+    const { MAX_BAR_PARTICIPATION } = require("./lib/strategy");
+    ok(MAX_BAR_PARTICIPATION === 0.10, "the participation cap is 10% of the entry bar's volume");
+    ok(!("MAX_BAR_PARTICIPATION" in RANGES) && !("maxBarParticipation" in RANGES),
+       "the tuner cannot search its way around the participation cap");
+    for (const f of ["lib/backtest.js", "engine.js"]) {
+      const src = require("fs").readFileSync(require("path").join(__dirname, f), "utf8");
+      if (/(const|let|var)\s+MAX_BAR_PARTICIPATION/.test(src)) ok(false, `${f} re-declares MAX_BAR_PARTICIPATION instead of importing it`);
+    }
+    ok(true, "the cap is declared once in lib/strategy.js and imported everywhere else");
+
+    /* every entry in a real backtest respects the cap */
+    const capDays = makeLibrary(20, 5);
+    let checked = 0, over = 0;
+    let eq = 100000;
+    for (const day of capDays) {
+      const r = runDay(day, DEFAULTS, eq);
+      for (const t of r.trades) {
+        const bar = (day.symbols[t.sym] || []).find((b) => b.m === t.entryM);
+        if (!bar || !bar.v) continue;
+        checked++;
+        if (t.qty > Math.floor(bar.v * MAX_BAR_PARTICIPATION)) over++;
+      }
+      eq = r.equity;
+    }
+    ok(checked > 0, `checked ${checked} entry fills against their bar's volume`);
+    ok(over === 0, `no entry exceeds ${MAX_BAR_PARTICIPATION * 100}% of the volume on its own bar (${over} violations)`);
+
+    /* a bar too thin to support a single share is skipped, not filled */
+    const thin = { date: "2026-01-05", symbols: { THIN: [] } };
+    for (let m = 4 * 60; m < 20 * 60; m++)
+      thin.symbols.THIN.push({ t: m, o: 1 + m / 1000, h: 1.2 + m / 1000, l: 0.9 + m / 1000, c: 1.1 + m / 1000, v: 5, m });
+    const thinRun = runDay(thin, DEFAULTS, 100000);
+    ok(thinRun.trades.length === 0, "a symbol whose bars trade 5 shares produces no fills at all");
+  }
+
   /* ---- the split is 60/20/20, chronological, and disjoint ---- */
   const sp = splitDays(days);
   ok(sp.train.length + sp.valid.length + sp.test.length === days.length, "the three splits partition the library exactly");

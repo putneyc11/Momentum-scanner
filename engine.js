@@ -39,7 +39,7 @@ const D = require("./lib/data");
 const BF = require("./lib/backfill");
 const { startDashboard } = require("./lib/dashboard");
 const { PaperBroker } = require("./lib/broker");
-const { prepSeries, exitCheck, entryViable } = require("./lib/strategy");
+const { prepSeries, exitCheck, entryViable, MAX_BAR_PARTICIPATION } = require("./lib/strategy");
 const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
 const { tune, splitDays } = require("./lib/tune");
@@ -662,6 +662,11 @@ async function cmdTrade() {
               const w = alloc[st.key] != null ? alloc[st.key] : 1; /* nightly risk weight */
               let qty = Math.floor((eq * (P.riskPct * w) / 100) / sig.risk);
               qty = Math.min(qty, Math.floor((eq * P.maxNotionalPct / 100) / px));
+              /* same participation cap the backtester uses — sizing has to
+                 match on both sides or the backtest measures a system we do
+                 not run. On a $0.18 name trading 800 shares a minute, the
+                 notional cap alone asks for ~119,000 shares. */
+              qty = Math.min(qty, Math.floor(bars[bars.length - 1].v * MAX_BAR_PARTICIPATION));
               if (qty < 1) continue;
               const target = P.targetR > 0 ? px + P.targetR * sig.risk : null;
               log(`ENTRY [${st.key}]${ext ? " (ext)" : ""} ${u.symbol} x${qty} @~${px.toFixed(2)} stop ${sig.stop.toFixed(2)}${target ? " target " + target.toFixed(2) : ""}`);
