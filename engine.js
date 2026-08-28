@@ -598,6 +598,11 @@ async function cmdTrade() {
             } catch (e) { log("scale-out failed:", p.symbol, e.message); }
             continue;
           }
+          /* barsHeld must mean MINUTES: exitCheck runs every 15s live (vs
+             once per 1-min bar in backtests), so wall-clock is the truth —
+             otherwise time stops fire 4x early for quick pods and rider
+             stall exits drift */
+          meta.barsHeld = Math.floor((Date.now() - (meta.placedAt || Date.now())) / 60000);
           const S = prepSeries(bars, P);
           const ex = exitCheck(S, bars, bars.length - 1, meta, P);
           if (!ex) continue;

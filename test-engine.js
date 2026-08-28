@@ -150,6 +150,7 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   const riders = STRATS.filter((s) => s.style === "ride");
   ok(riders.length === 2 && riders.every((st) => st.DEFAULTS.hwmTrailPct > 0 && st.DEFAULTS.targetR === 0 && st.DEFAULTS.scaleOutPct === 100 && !st.DEFAULTS.vwapExit), "riders have NO profit target — only the %-off-high ratchet");
   ok(riders.every((st) => !("targetR" in st.RANGES) && !("scaleOutPct" in st.RANGES)), "the tuner can never hand a rider a profit target");
+  ok(riders.every((st) => st.DEFAULTS.timeStopMin >= 60 && st.DEFAULTS.timeStopMin <= 300), "riders carry a stall exit (a dead moonshot recycles its slot within hours)");
   ok(STRATS[0].style === "ride" && STRATS[1].style === "ride", "riders are listed first: priority claim on the strongest breakouts");
 
   /* the ride ratchet holds a monster run and exits on the first deep dip */
