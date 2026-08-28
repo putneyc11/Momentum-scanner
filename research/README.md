@@ -17,6 +17,7 @@ here that reproduces it, that claim is not checkable and should not be graded.
 | `regime.js` | Does a pod work in both chronological halves, or only the easy one? |
 | `splithalf.js` | The same split for one specific parameter change. |
 | `exits.js` | What actually closes a pod's trades, and what each exit reason is worth in R. Run this before touching an exit parameter — redgreen turned out to be 77% stop-outs, which made its target and time-stop settings irrelevant. |
+| `exitmix.js` | The same question as `exits.js`, but for a **tuned champion's** params file rather than DEFAULTS. Run it on anything a tune produced before describing what the change did: raising `maxStopPct` lifts only a cap, so a "wider stop" champion can turn out to be exiting on VWAP and time instead. Prints the verdict line. |
 | `stops2.js` | Profit factor vs stop width, per pod, both halves. The sweep that produced HYP-001. |
 | `falsifier2.js` | Is a stop-width gain real, or just fewer round trips paying less slippage? Re-runs at `slipBps 0`, where there is no cost to save. |
 | `slip-sweep.js` | How much of a result survives a realistic slippage assumption? Also prints the price distribution of the traded tape. |
