@@ -36,18 +36,15 @@ const CONTROLS = ["window", "hour", "bucket15"];
 let seed = 20260828;
 const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
 
-/* Where nothing printed inside the window there is no observation, so the
-   sample is dropped rather than scored as zero. */
-const fwd = (bars, idx, h) => {
-  const e = bars[idx + 1]; if (!e) return null;
-  const target = e.m + h;
-  let j = idx + 1;
-  while (j + 1 < bars.length && bars[j + 1].m <= target) j++;
-  if (j === idx + 1) return null;
-  return e.o > 0 ? (bars[j].c - e.o) / e.o * 1e4 : null;
-};
+/* fwd, keyFor, controlPools and side now live in lib/edgecore.js and are
+   pinned by fixtures in test-engine.js. They were inline here through three
+   separate defects -- bar-count horizons, a control blind to the clock, and a
+   control that could see the future -- each of which looked reasonable in the
+   output. A research script whose core is not pinned produces numbers that are
+   not reportable. */
+const { fwd, keyFor, controlPools, side: sideOf } = require("../lib/edgecore");
+
 const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
-const keyFor = (m, c) => c === "window" ? 0 : c === "hour" ? Math.floor(m / 60) : Math.floor(m / 15);
 
 console.log(`${days.length} days — forward return in bps from the fill, no costs`);
 console.log(`controls are matched on symbol and day; "hour" and "bucket15" also match time of day\n`);
@@ -80,17 +77,8 @@ for (const st of STRATS) {
       const hits = [...hitSet];
       nSig += hits.length;
 
-      const pools = {}; for (const c of CONTROLS) pools[c] = new Map();
-      for (let i = 0; i < bars.length - 1; i++) {
-        const m = bars[i].m;
-        if (m < P.entryStartMin || m > P.entryEndMin) continue;
-        if (hitSet.has(i)) continue;
-        for (const c of CONTROLS) {
-          const k = keyFor(m, c);
-          if (!pools[c].has(k)) pools[c].set(k, []);
-          pools[c].get(k).push(i);
-        }
-      }
+      const pools = {};
+      for (const c of CONTROLS) pools[c] = controlPools(bars, hitSet, c, P.entryStartMin, P.entryEndMin);
 
       for (const i of hits) {
         HZ.forEach((h, k) => {
@@ -105,7 +93,7 @@ for (const st of STRATS) {
           /* A draw BEFORE the signal bar can contain the very burst that later
              triggers the signal — that is hindsight, not a minute any rule
              could have chosen. Split it out rather than averaging over it. */
-          const side = j < i ? pre : post;
+          const side = sideOf(j, i) === "before" ? pre : post;
           HZ.forEach((h, k) => {
             if (k === 0 && c === "bucket15") ctlTried++;
             const r = fwd(bars, j, h);

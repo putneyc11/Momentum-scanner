@@ -631,6 +631,58 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     ok(/D\.recordDay\(/.test(loop), "the live loop still records each day to the library");
   }
 
+  /* ---- edge.js core: the three defects that shipped in this instrument ---- */
+  {
+    const E = require("./lib/edgecore");
+
+    /* Defect 1, shipped: horizons counted in BARS. Alpaca emits a bar only
+       when a trade printed, so a gapped series makes index offset != minute
+       offset. This tape has minutes 570,571,572 then a hole to 600. */
+    const gapped = [
+      bar(570, 1, 1, 1, 1), bar(571, 1, 1, 1, 1), bar(572, 1, 1, 1, 1),
+      bar(600, 2, 2, 2, 2), bar(601, 3, 3, 3, 3),
+    ];
+    /* fill at index 1 (m=571, open 1). +5 wall-clock minutes reaches m=576;
+       the last bar at or before that is m=572, close 1 -> 0 bps. Counting 5
+       BARS would land on m=601 close 3 -> +20000 bps. */
+    ok(E.fwd(gapped, 0, 5) === 0, "fwd measures wall-clock minutes, not bar offsets");
+    /* +30 minutes from m=571 reaches m=601, and the window is INCLUSIVE, so
+       the last bar inside it is m=601 close 3 against open 1 -> +20000 bps.
+       (Both of these expectations were wrong when first written and the
+       fixture caught the author, which is the point of having it.) */
+    ok(E.fwd(gapped, 0, 30) === 20000, "fwd spans a gap when the window covers the far side");
+
+    /* Defect 1b: nothing printed inside the window is an ABSENCE, not a zero.
+       Needs a gap LARGER than the horizon: fill at m=571, window to m=576,
+       next print not until m=650. */
+    const beyond = [bar(570, 1, 1, 1, 1), bar(571, 1, 1, 1, 1), bar(650, 9, 9, 9, 9)];
+    ok(E.fwd(beyond, 0, 5) === null, "fwd returns null when no bar printed inside the window");
+    ok(E.fwd(gapped, 4, 5) === null, "fwd returns null when there is no fill bar at all");
+
+    /* Defect 2, shipped: the control could not see the clock. `window` pools
+       the whole session into one bucket, which is exactly why it is biased for
+       a signal that clusters; hour and bucket15 must partition. */
+    ok(E.keyFor(570, "window") === E.keyFor(1100, "window"), "window pools the whole session");
+    ok(E.keyFor(570, "hour") !== E.keyFor(640, "hour"), "hour separates different clock hours");
+    ok(E.keyFor(570, "bucket15") !== E.keyFor(586, "bucket15"), "bucket15 separates 15-minute blocks");
+    ok(E.keyFor(570, "bucket15") === E.keyFor(583, "bucket15"), "bucket15 keeps one block together");
+
+    /* Defect 2b: EVERY signal bar must leave the control pool, not just the
+       bar under test. On a flood pod the neighbours are signals too. */
+    const tape = [];
+    for (let m = 570; m < 590; m++) tape.push(bar(m, 1, 1, 1, 1));
+    const hits = new Set([2, 3, 4]);
+    const pools = E.controlPools(tape, hits, "bucket15", 570, 1170);
+    const all = [...pools.values()].flat();
+    ok(all.length > 0, "control pool is non-empty on a clean tape");
+    ok(!all.some((i) => hits.has(i)), "control pool excludes EVERY signal bar, not just the one under test");
+
+    /* Defect 3, shipped: a draw before the signal collects the burst that
+       later causes it. That is hindsight and must be classified, not averaged. */
+    ok(E.side(3, 7) === "before" && E.side(9, 7) === "after",
+      "control draws are classified by position relative to the signal");
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
