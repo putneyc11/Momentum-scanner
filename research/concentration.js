@@ -9,7 +9,9 @@ const { DEFAULTS } = require("../lib/strategy");
 const { runBacktest } = require("../lib/backtest");
 
 const days = D.loadRecordedDays();
-const st = STRATS.find(s => s.key === process.argv[2] || "surge");
+const POD = process.argv[2] || "surge";
+const st = STRATS.find((s) => s.key === POD);
+if (!st) { console.error(`no such pod: ${POD}`); process.exit(1); }
 const res = runBacktest(days, { ...DEFAULTS, ...st.DEFAULTS }, 100000, st.signalAt);
 const t = res.trades || [];
 console.log(`surge: ${t.length} trades, PF ${res.metrics.profitFactor}\n`);
