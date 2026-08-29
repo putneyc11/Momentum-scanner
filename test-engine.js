@@ -65,8 +65,13 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     for (let m = 607; m < 960; m++) bars.push(bar(m, 1.25, 1.26, 1.24, 1.25, 10000));
   }) } };
   const r1 = runDay(stopDay, P, 100000);
-  ok(r1.trades.length === 1 && r1.trades[0].reason === "stop", "intrabar stop breach exits as a stop");
-  ok(approx(r1.trades[0].r, -1, 0.15), `stop loss costs ~1R (got ${r1.trades[0].r.toFixed(2)}R)`);
+  /* HYP-005: the exit is capped by the tape, so a position bigger than the bar
+     unwinds over several bars. Every fill is still a stop at the same price. */
+  ok(r1.trades.length >= 1 && r1.trades.every((t) => t.reason === "stop"),
+    `intrabar stop breach exits as a stop (${r1.trades.length} fill(s))`);
+  const r1Qty = r1.trades.reduce((a, t) => a + t.qty, 0);
+  const r1R = r1.trades.reduce((a, t) => a + t.r * t.qty, 0) / r1Qty;
+  ok(approx(r1R, -1, 0.15), `stop loss costs ~1R (got ${r1R.toFixed(2)}R size-weighted)`);
   /* target day: next bars run to the take-profit */
   const targetDay = { date: "T2", symbols: { BBB: mk((bars) => {
     for (let m = 606; m < 640; m++) bars.push(bar(m, 2.2 + (m - 606) * 0.02, 2.23 + (m - 606) * 0.02, 2.19 + (m - 606) * 0.02, 2.22 + (m - 606) * 0.02, 60000));
@@ -91,6 +96,140 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
   const P4 = { ...P, maxPositions: 2, targetR: 50 };
   const r4 = runDay(many, P4, 100000);
   ok(r4.trades.length === 2, `maxPositions caps concurrent exposure (took ${r4.trades.length}/5 signals)`);
+}
+
+/* ---- HYP-005: exits are capped by the tape and unwind over bars ----
+   The participation cap used to apply to entries only, so an exit sold the
+   whole position at the close however thin the bar was. Every gate of the new
+   model gets an assertion, including the two that make it two-sided: a carried
+   remainder is a LIVE position that can change its mind, and the end-of-day
+   residue is the one fill still not backed by volume. */
+{
+  const { MAX_BAR_PARTICIPATION, MAX_FORCED_SLIP_BPS } = require("./lib/strategy");
+  const base = { ...DEFAULTS, minConfluence: 2, orbMinutes: 5, slipBpsOverride: 0, riskPct: 1,
+                 vwapExit: 0, entryStartMin: 570, entryEndMin: 780, scaleOutPct: 100,
+                 reentryLimit: 1, flattenMin: 955, targetR: 50, timeStopMin: 999 };
+  const lead = (bars) => {
+    for (let m = 560; m < 570; m++) bars.push(bar(m, 2, 2.05, 1.95, 2, 20000));
+    for (let m = 570; m < 575; m++) bars.push(bar(m, 2, 2.1, 1.98, 2.05, 40000));
+    for (let m = 575; m < 605; m++) bars.push(bar(m, 2.05, 2.09, 2.0, 2.06, 30000));
+    bars.push(bar(605, 2.06, 2.2, 2.05, 2.18, 200000));   // signal
+    bars.push(bar(606, 2.18, 2.19, 2.17, 2.18, 300000));  // entry fills here
+    return bars;
+  };
+
+  /* NO FILL CAN EXCEED ITS OWN BAR'S CAPACITY, and nothing is lost or invented */
+  {
+    const bars = lead([]);
+    for (let m = 607; m < 960; m++) bars.push(bar(m, 1.25, 1.26, 1.24, 1.25, 10000)); // dumps through the stop, thin
+    const day = { date: "CAP", symbols: { AAA: bars } };
+    const r = runDay(day, base, 100000);
+    const volAt = new Map(bars.map((b) => [b.m, b.v]));
+    let over = 0;
+    for (const t of r.trades) {
+      const cap = Math.floor((volAt.get(t.exitM) || 0) * MAX_BAR_PARTICIPATION);
+      if (!t.forced && t.qty > cap) over++;
+    }
+    ok(r.trades.length > 1, `an exit larger than the bar unwinds over several bars (${r.trades.length} fills)`);
+    ok(over === 0, "no unforced fill exceeds its own bar's participation capacity");
+    ok(r.trades.every((t) => t.qty >= 1), "no zero-share fills are booked");
+    /* conservation: the fills sum to one position, and the first is the only
+       one not marked as carried */
+    ok(r.trades.filter((t) => t.carried === 0).length === 1,
+      "exactly one fill is the original attempt; the rest are carried remainders");
+    ok(r.trades.slice(1).every((t) => t.carried > 0 && t.firstPx != null),
+      "every carried fill records how long it waited and what the first attempt got");
+  }
+
+  /* A CARRIED REMAINDER IS LIVE: it goes back through exitCheck and can leave
+     for a different reason than the one that started the unwind. */
+  {
+    const bars = lead([]);
+    for (let m = 607; m < 615; m++) bars.push(bar(m, 2.18, 2.19, 2.17, 2.18, 4000));   // time-stop territory, very thin
+    for (let m = 615; m < 960; m++) bars.push(bar(m, 1.10, 1.11, 1.05, 1.10, 4000));   // then it collapses
+    const day = { date: "LIVE", symbols: { BBB: bars } };
+    const r = runDay(day, { ...base, timeStopMin: 2 }, 100000);
+    const reasons = new Set(r.trades.map((t) => t.reason));
+    ok(r.trades.length > 1 && reasons.has("time") && reasons.has("stop"),
+      `a carried remainder re-evaluates and can exit for a different reason (${[...reasons].join("+")})`);
+    ok(r.trades.find((t) => t.reason === "stop").exitM > r.trades[0].exitM,
+      "the changed reason happens on a later bar, not retroactively");
+  }
+
+  /* THE REMAINDER KEEPS ITS SLOT. maxPositions 1 with two candidates: the
+     second cannot enter until the first is genuinely flat, not merely
+     decided-upon. */
+  {
+    const mkSym = () => {
+      const bars = lead([]);
+      for (let m = 607; m < 960; m++) bars.push(bar(m, 1.25, 1.26, 1.24, 1.25, 10000));
+      return bars;
+    };
+    const day = { date: "SLOT", symbols: { AAA: mkSym(), BBB: mkSym() } };
+    const r = runDay(day, { ...base, maxPositions: 1 }, 100000);
+    const a = r.trades.filter((t) => t.sym === "AAA");
+    const b = r.trades.filter((t) => t.sym === "BBB");
+    if (a.length && b.length) {
+      const aFlat = Math.max(...a.map((t) => t.exitM));
+      ok(b[0].entryM > a[0].exitM,
+        "a position being unwound still occupies its slot — the next entry waits for the remainder");
+      ok(b[0].entryM >= aFlat, `the slot frees only when the unwind is complete (flat ${aFlat}, next entry ${b[0].entryM})`);
+    } else {
+      ok(a.length > 0 && b.length === 0, "the slot is held through the whole unwind — the second candidate never enters");
+    }
+  }
+
+  /* NO TAPE, NO FILL. A zero-volume bar cannot absorb anything. */
+  {
+    const bars = lead([]);
+    for (let m = 607; m < 700; m++) bars.push(bar(m, 1.25, 1.26, 1.24, 1.25, 0));      // no volume at all
+    for (let m = 700; m < 960; m++) bars.push(bar(m, 1.25, 1.26, 1.24, 1.25, 10000));
+    const day = { date: "NOVOL", symbols: { CCC: bars } };
+    const r = runDay(day, base, 100000);
+    ok(r.trades.every((t) => t.exitM >= 700 || t.forced),
+      "a bar that traded nothing absorbs nothing — no fills before the tape returns");
+  }
+
+  /* THE FORCED RESIDUE: the one fill not backed by volume, tagged as such and
+     paying slippage scaled by how far past capacity it reaches. */
+  {
+    const bars = lead([]);
+    /* holds above the stop all day so nothing exits, then the last bar is thin */
+    for (let m = 607; m < 959; m++) bars.push(bar(m, 2.18, 2.19, 2.17, 2.18, 200));
+    const day = { date: "FORCE", symbols: { DDD: bars } };
+    /* real slippage here, not the research override: the forced penalty scales
+       the price tier, so with slipBpsOverride 0 there is nothing to scale and
+       a forced fill correctly costs nothing extra */
+    const forceP = { ...base, flattenMin: 1195 };
+    delete forceP.slipBpsOverride;
+    const r = runDay(day, forceP, 100000);
+    const forced = r.trades.filter((t) => t.forced);
+    ok(forced.length >= 1, "whatever is left at the end of the day is forced out — nothing carries overnight");
+    const f = forced[0];
+    const last = bars[bars.length - 1];
+    ok(f.qty > Math.floor(last.v * MAX_BAR_PARTICIPATION),
+      "the forced fill is allowed to exceed capacity, which is exactly why it is tagged");
+    ok(f.exit < last.c, "a forced fill pays more than the close");
+    ok(f.exit >= last.c * (1 - MAX_FORCED_SLIP_BPS / 1e4) - 1e-9,
+      "forced slippage is clamped — an unbounded participation multiple would price the fill below zero");
+  }
+
+  /* slipBpsOverride removes the forced penalty too, because the penalty is a
+     multiple of the spread. That is right for a research script measuring with
+     costs off, and worth pinning so nobody reads a zero-cost run as evidence
+     that forced exits are cheap. */
+  {
+    const bars = lead([]);
+    for (let m = 607; m < 959; m++) bars.push(bar(m, 2.18, 2.19, 2.17, 2.18, 200));
+    const r = runDay({ date: "FREE", symbols: { EEE: bars } }, { ...base, flattenMin: 1195 }, 100000);
+    const f = r.trades.find((t) => t.forced);
+    ok(f && approx(f.exit, bars[bars.length - 1].c, 1e-9),
+      "with slipBpsOverride 0 a forced exit costs nothing — the penalty scales the spread");
+  }
+
+  /* the ceiling is frozen, like the participation cap it complements */
+  ok(!("MAX_FORCED_SLIP_BPS" in RANGES) && !("maxForcedSlipBps" in RANGES),
+    "the tuner cannot search its way out of paying for a forced exit");
 }
 
 /* ---- scale-out: 85% banked at the target, runner rides with break-even floor ---- */
