@@ -44,6 +44,7 @@ const { prepSeries, exitCheck, entryViable, MAX_BAR_PARTICIPATION } = require(".
 const { STRATS } = require("./lib/strategies");
 const { runBacktest } = require("./lib/backtest");
 const R = require("./lib/regress");
+const SC = require("./lib/screen");   /* HYP-008 screen census */
 const { tune, splitDays } = require("./lib/tune");
 const { makeLibrary } = require("./lib/synth");
 
@@ -439,6 +440,34 @@ async function cmdTrade() {
             const f = D.recordDay(bars);
             if (f) log("recorded day ->", f);
           }
+          /* HYP-008 — the screen sidecar, written ONCE here.
+
+             The census itself costs nothing extra: discover() already had
+             these snapshots in memory every 90s and was throwing the failing
+             values away. Only the stratified reject tapes are a fetch, and they
+             happen here rather than per-poll.
+
+             It writes to state/screen/, never state/days/: loadRecordedDays()
+             parses every *.json in that folder, so a sidecar filed next to the
+             day files would be read as a day and would corrupt every pod's
+             backtest. Wrapped, because a recorder fault must never take down
+             the trading loop. */
+          try {
+            const gates = {
+              PM_PCT_FLOOR: D.PM_PCT_FLOOR, RTH_PCT_FLOOR: D.RTH_PCT_FLOOR,
+              PM_MIN_VOL: D.PM_MIN_VOL, MIN_DAY_VOL: D.MIN_DAY_VOL,
+              FAST_VOL_FLOOR: D.FAST_VOL_FLOOR, MIN_PRICE: D.MIN_PRICE, MAX_PRICE: D.MAX_PRICE,
+            };
+            const strata = SC.stratify(day, gates);
+            const rejectSyms = [...new Set(Object.values(strata).flat())];
+            const tapes = rejectSyms.length ? await D.fetchBars1Min(keys, rejectSyms) : {};
+            const sf = SC.writeSidecar(day, { strata, tapes });
+            const short = Object.entries(strata)
+              .filter(([id, list]) => list.length < (SC.STRATA.find((x) => x.id === id) || {}).n)
+              .map(([id, list]) => `${id} ${list.length}`);
+            if (sf) log(`screen census -> ${sf}  ${rejectSyms.length} reject tapes`
+              + (short.length ? `  short (left short, never topped up): ${short.join(", ")}` : ""));
+          } catch (e) { log("screen census failed (trading unaffected):", e && e.message); }
           /* missed-mover audit: ranked movers that never got an entry */
           const enteredSyms = new Set(Object.keys(entriesToday).map((k) => k.split(":")[1]));
           const missed = D.moversSeenToday(day).filter((s) => !enteredSyms.has(s));

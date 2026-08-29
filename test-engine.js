@@ -631,6 +631,133 @@ const bar = (m, o, h, l, c, v = 50000) => ({ t: m * 60000, o, h, l, c, v, m });
     ok(/D\.recordDay\(/.test(loop), "the live loop still records each day to the library");
   }
 
+  /* ---- HYP-008: the screen census and its reject sample ---- */
+  {
+    const SC = require("./lib/screen");
+    const D2 = require("./lib/data");
+    const fsx = require("fs"), px = require("path");
+    const GATES = { PM_PCT_FLOOR: 10, RTH_PCT_FLOOR: 25, PM_MIN_VOL: 25000,
+                    MIN_DAY_VOL: 5e6, FAST_VOL_FLOOR: 3e5, MIN_PRICE: 0.03, MAX_PRICE: 100 };
+
+    /* THE FOOTGUN. loadRecordedDays ingests every *.json in state/days, so a
+       sidecar filed there would parse as a day and corrupt every pod's
+       backtest. It must live somewhere that function cannot see. */
+    {
+      const daysDir = px.join(D2.STATE, "days");
+      ok(!SC.SCREEN_DIR.startsWith(daysDir + px.sep) && SC.SCREEN_DIR !== daysDir,
+        "the screen sidecar directory is NOT inside state/days");
+      ok(!px.dirname(SC.sidecarPath("2099-01-02")).startsWith(daysDir),
+        "no sidecar path can ever resolve into the day-file folder");
+      /* the file-level check, without parsing 144 day tapes: loadRecordedDays
+         reads exactly the *.json entries of state/days, so if writing a sidecar
+         leaves that listing untouched it can never be read as a day */
+      const listing = () => { try { return fsx.readdirSync(daysDir).filter((x) => x.endsWith(".json")).sort().join(","); } catch { return ""; } };
+      const before = listing();
+      SC.reset("2099-01-02");
+      SC.observe("2099-01-02", "ZZTOP", { min: 600, session: "rth", price: 3, pct: 40, prevClose: 2,
+                                          reason: "admit", returnedAtMin: 600 });
+      const f = SC.writeSidecar("2099-01-02");
+      ok(f && fsx.existsSync(f), "the sidecar is written");
+      ok(listing() === before, "writing a sidecar does not add a file to state/days");
+      ok(px.dirname(f) !== daysDir, `the sidecar lands in ${px.basename(px.dirname(f))}/, not days/`);
+      try { fsx.unlinkSync(f); } catch {}
+    }
+
+    /* census merge semantics */
+    {
+      SC.reset("D1");
+      SC.observe("D1", "AAA", { min: 500, session: "pm", price: 1.0, pct: 4, prevClose: 0.96, reason: "pm_pct" });
+      SC.observe("D1", "AAA", { min: 560, session: "pm", price: 1.2, pct: 25, prevClose: 0.96, reason: "pm_pct" });
+      const r = SC.rowsFor("D1").get("AAA");
+      ok(r.firstSeenMin === 500 && r.pctAtFirst === 4 && r.priceAtFirst === 1.0,
+        "first-touch fields are written once and never overwritten");
+      ok(r.maxPct === 25 && r.priceAtMaxPct === 1.2 && r.minAtMaxPct === 560,
+        "max-pct ratchets and carries its own price and minute");
+      /* a name that fails at 09:35 and admits at 10:10 is ADMITTED and leaves
+         the reject sample — otherwise it is counted in both classes */
+      SC.observe("D1", "AAA", { min: 610, reason: "admit", returnedAtMin: 610, reasonAdmit: "rth_classic" });
+      SC.observe("D1", "AAA", { min: 620, reason: "rth_pct" });
+      ok(SC.rowsFor("D1").get("AAA").failOrAdmit === "admit",
+        "admit outranks every later reject reason");
+      ok(SC.rowsFor("D1").get("AAA").firstSeenPollMin === 610,
+        "P0's clock is the first poll the name was RETURNED in, not the first cross");
+      SC.observe("D1", "AAA", { returnedAtMin: 700 });
+      ok(SC.rowsFor("D1").get("AAA").firstSeenPollMin === 610, "the P0 clock is set once and never moves");
+    }
+
+    /* causal rank: first-poll value is pinned, best ratchets down */
+    {
+      SC.reset("D2");
+      SC.observe("D2", "BBB", { min: 600, session: "rth", causalRank: 30 });
+      SC.observe("D2", "BBB", { min: 610, causalRank: 12 });
+      SC.observe("D2", "BBB", { min: 620, causalRank: 45 });
+      const r = SC.rowsFor("D2").get("BBB");
+      ok(r.causalRankAtFirstPoll === 30 && r.bestCausalRank === 12,
+        "causal rank keeps both the first-poll value and the best of the day");
+    }
+
+    /* deterministic stratified draw */
+    {
+      const build = () => {
+        SC.reset("D3");
+        /* eight RTH near-misses; only the six closest to the 25% floor get tape */
+        for (let i = 0; i < 8; i++)
+          SC.observe("D3", "R" + i, { min: 600, session: "rth", price: 5, pct: 16 + i, vol: 4e5, reason: "rth_pct" });
+        /* one PM near-miss only: that stratum is short and must stay short */
+        SC.observe("D3", "P0S", { min: 500, session: "pm", price: 2, pct: 9.5, vol: 1e5, reason: "pm_pct" });
+        /* an admitted name must never be sampled as a reject */
+        SC.observe("D3", "ADM", { min: 600, session: "rth", price: 5, pct: 17, vol: 4e5, reason: "admit", returnedAtMin: 600 });
+      };
+      build();
+      const a = SC.stratify("D3", GATES);
+      build();
+      const b = SC.stratify("D3", GATES);
+      ok(JSON.stringify(a) === JSON.stringify(b), "the stratified draw is deterministic");
+      ok(a.near_pct_rth.length === 6, `near_pct_rth respects its cap of 6 (got ${a.near_pct_rth.length})`);
+      /* closest to the threshold first: pct 24,23,22,21,20,19 -> R7..R2 */
+      ok(a.near_pct_rth[0] === "R7" && a.near_pct_rth[5] === "R2",
+        `the draw is by distance to the threshold, closest first (${a.near_pct_rth.join(",")})`);
+      ok(a.near_pct_pm.length === 1,
+        "a short stratum is left short — it is never topped up from another one");
+      const all = Object.values(a).flat();
+      ok(!all.includes("ADM"), "an admitted name is never drawn into the reject sample");
+      ok(new Set(all).size === all.length, "no symbol appears in two strata");
+    }
+
+    /* N1 is the pooled PCT near-miss only */
+    {
+      ok(SC.N1_STRATA.has("near_pct_pm") && SC.N1_STRATA.has("near_pct_rth") && SC.N1_STRATA.has("near_pct_ah"),
+        "N1 pools the three pct near-miss strata");
+      ok(!SC.N1_STRATA.has("near_vol_pm") && !SC.N1_STRATA.has("near_vol_rth")
+         && !SC.N1_STRATA.has("rank_41_60") && !SC.N1_STRATA.has("sham"),
+        "N1 excludes volume-miss, rank-overflow and sham — pooling them is how an empty screen hides");
+    }
+
+    /* a session only counts if the census carries what P0 needs */
+    {
+      SC.reset("D4");
+      SC.observe("D4", "CCC", { min: 600, session: "rth", price: 5, pct: 30, reason: "admit", returnedAtMin: 600 });
+      const f = SC.writeSidecar("D4");
+      const body = JSON.parse(require("fs").readFileSync(f, "utf8"));
+      ok(body.usable === false, "a day with an admit but no prevClose is NOT usable — P0 would be undefined");
+      try { require("fs").unlinkSync(f); } catch {}
+      SC.reset("D5");
+      SC.observe("D5", "CCC", { min: 600, session: "rth", price: 5, pct: 30, prevClose: 3.8,
+                                reason: "admit", returnedAtMin: 600 });
+      const f2 = SC.writeSidecar("D5");
+      ok(JSON.parse(require("fs").readFileSync(f2, "utf8")).usable === true,
+        "a day with prevClose and a first-poll minute counts toward the 40");
+      try { require("fs").unlinkSync(f2); } catch {}
+    }
+
+    /* the recorder must never be able to break trading */
+    {
+      let threw = false;
+      try { SC.observe("D6", "DDD", null); SC.observe(undefined, undefined, undefined); } catch { threw = true; }
+      ok(!threw, "a malformed observation is swallowed — instrumentation cannot break discovery");
+    }
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
