@@ -1,3 +1,20 @@
+/* !! VOID -- DO NOT USE THE temp 0.15 NUMBERS FROM THIS SCRIPT !!
+   Red Team FATAL #8 (REVIEWS/HYP-009.md, 2026-08-29), confirmed correct.
+
+   Line ~60 perturbs `base` on every row. lib/tune.js:105 perturbs `champ`,
+   which updates on every acceptance -- so setting temp to 0.15 here does NOT
+   model the end of a tuning run. There is no walk, therefore no late champion.
+   The late range, late IQR, median-improving-step and tie-rate figures this
+   produced are void and were retracted in channel.
+
+   The temp 1.00 numbers ARE still valid: at iteration 1 `champ` is still
+   `base` and temp is 0.996, so perturbing DEFAULTS at temp 1.0 is exactly
+   iteration 1. That is the only cloud this script models faithfully, and it
+   is the one HYP-009's falsifier #1 asks about.
+
+   Superseded by research/walk.js, which runs the real adaptive trajectory and
+   validates itself against tune() before reporting.
+*/
 /* Companion to scorerange.js. That one draws uniformly from RANGES, which is
    the literal reading of "across meaningfully different strategies" -- but it
    is NOT the cloud the tuner walks. lib/tune.js anneals from the CHAMPION,
