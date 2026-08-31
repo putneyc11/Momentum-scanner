@@ -61,6 +61,36 @@ alerts powered by the paper-trading ensemble's recorded-day library.
   home-screen footer to an ⓘ About page (decided 2026-08-31).
 - Not a brokerage; never places real-money trades.
 
+## Business goal (recorded 2026-08-31)
+
+Target: a subscription consumer product (~$9.99/mo or $49.99/yr) built
+on the "Option B" architecture — REAL-TIME ALERTS, DELAYED DISPLAY:
+
+- One licensed vendor feed with commercial redistribution rights
+  replaces the owner's personal Alpaca keys; the server consumes the
+  feed centrally and computes everything (this is already the app's
+  shape — server-side watchlist monitoring + push).
+- Alerts pushed to users are DERIVED DATA → flat distributor licensing
+  (planning figure ~$1.5k/mo), no per-user exchange fees, no
+  non-professional attestations, no monthly user reporting.
+- In-app charts/watchlist prices run 15-minute delayed for subscribers;
+  the real-time alert IS the product.
+- IEX-only real-time (already an app feed mode) is viable only as a
+  free-tier teaser — too sparse for the small-cap universe as the paid
+  backbone. Full real-time display ("Option A", ~$1/user/mo Nasdaq
+  Basic fees + attestations) is a later premium tier once subscriber
+  count makes per-user fees trivial.
+- Planning economics: breakeven ≈150–230 subs at $9.99; ~85% marginal
+  contribution after that; assume 8–15% monthly churn. Figures come
+  from public fee schedules, NOT vendor quotes — redistribution pricing
+  and the derived-data classification of alerts must be confirmed in
+  writing during vendor/exchange onboarding.
+
+Design/architecture implication for all future work: keep alert
+computation SERVER-SIDE and centralized; keep the display layer
+feed-agnostic and tolerant of delayed data; never build a feature that
+requires per-user real-time display entitlements to function.
+
 ## Confirmed product decisions (2026-08-31)
 
 - First-run onboarding: full-screen swipeable LIVE-PREVIEW slides
