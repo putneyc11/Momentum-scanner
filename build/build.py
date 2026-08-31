@@ -68,6 +68,20 @@ REPS = [
         const mraw = localStorage.getItem("muted-syms");
         if (mraw) restoreMuted(JSON.parse(mraw));
       } catch {}'''),
+    ('''      let seen = false, hasKeys = false;
+      try {
+        const os = await window.storage.get("onboard-seen");
+        seen = !!(os && os.value);
+      } catch {}
+      try {
+        const kr = await window.storage.get("alpaca-keys");
+        hasKeys = !!(kr && kr.value);
+      } catch {}''',
+     '''      let seen = false, hasKeys = false;
+      try { seen = !!localStorage.getItem("onboard-seen"); } catch {}
+      try { hasKeys = !!localStorage.getItem("alpaca-keys"); } catch {}'''),
+    ('try { window.storage.set("onboard-seen", "1"); } catch (e) {}',
+     'try { localStorage.setItem("onboard-seen", "1"); } catch (e) {}'),
     ('export default function App()', 'function App()'),
 ]
 

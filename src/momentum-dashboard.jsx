@@ -592,6 +592,218 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
   );
 }
 
+/* ---------------- first-run walkthrough ----------------
+   Six swipeable slides, each a LIVE mini-demo built from the app's real
+   components (GainerRow, Spark, BellIcon) running scripted data — the
+   preview IS the product, not a brochure. Shown before key entry on a
+   fresh device; reopenable any time from the header's ? control. */
+const OB_ROW = (over) => ({ symbol: "DMO", price: 4.86, pct: 62.4, dayVol: 8.4e6, score: 82, grade: "A", rotation: null, ...over });
+const OB_SLIDES = [
+  { title: "The market opens at 4 AM.\nSo do we.", sub: "Full-market discovery from the first premarket print — the list fills itself, re-ranks by setup score, and re-prices every 3 seconds through the 8 PM after-hours close." },
+  { title: "Know why it's moving.", sub: "The latest catalyst headline rides on every row — and when recent news smells like an offering, a dilution flag warns you before you chase." },
+  { title: "Halts won't surprise you.", sub: "Tape-stall detection with a live halt timer, plus estimated LULD halt bands so you can see where the next pause would arm." },
+  { title: "Watch the float rotate.", sub: "Live float rotation on every row — and an alert the moment the float has traded 1×, 2×, 3× over." },
+  { title: "Rewind any run.", sub: "Scrub back through the session's tape bar by bar, or press play and watch the move rebuild — right on your phone." },
+  { title: "Your alerts, your rules.", sub: "A bell on every row. VWAP reclaims, breakouts, volume surges and float rotations reach your lock screen — only for the stocks you keep armed." },
+];
+function ObDemo({ slide, tick }) {
+  const t = tick;
+  const wrap = { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", width: "100%" };
+  const noop = () => {};
+  if (slide === 0) {
+    const sess = ["PREMARKET", "REGULAR HOURS", "AFTER HOURS"][Math.floor(t / 4) % 3];
+    const rows = [
+      OB_ROW({ symbol: "DMO", price: 4.86 + (t % 2) * 0.03, pct: 62.4 + (t % 2) * 0.4 }),
+      OB_ROW({ symbol: "GAPR", price: 2.31 + (t % 2) * 0.01, pct: 41.1, score: 74, grade: "B", dayVol: 5.1e6 }),
+      OB_ROW({ symbol: "RNNR", price: 7.12, pct: 28.9 + (t % 2) * 0.2, score: 61, grade: "C", dayVol: 3.2e6 }),
+    ].slice(0, Math.min(3, 1 + Math.floor(t / 2)));
+    return (
+      <div style={wrap}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", borderBottom: `1px solid ${C.border}` }}>
+          <span style={{ fontFamily: MONO, fontSize: 9, letterSpacing: 1.5, color: C.amber }}>{sess}</span>
+          <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>· live 3s</span>
+        </div>
+        {rows.map((g) => <GainerRow key={g.symbol} g={g} bars={null} onOpen={noop} fill />)}
+      </div>
+    );
+  }
+  if (slide === 1) {
+    const staged = t >= 5;
+    const g = staged
+      ? OB_ROW({ symbol: "DILU", price: 1.92, pct: 44.0, score: 55, grade: "C", dayVol: 6.2e6 })
+      : OB_ROW();
+    const news = t >= 2 ? { headline: staged ? "DILU announces $12M registered direct offering" : "DMO receives FDA fast-track designation for lead candidate", at: Date.now() - 3600e3, dilution: staged } : null;
+    return (
+      <div style={wrap}>
+        <GainerRow g={g} bars={null} news={news} onOpen={noop} fill />
+        {news && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 12px", borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.muted }}>
+            {news.dilution && <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>DILUTION RISK</span>}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📰 {news.headline}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (slide === 2) {
+    return (
+      <div style={wrap}>
+        <GainerRow g={OB_ROW({ symbol: "HLTD", price: 5.11, pct: 88.2, score: 77, grade: "B" })} bars={null} halted haltedAt={Date.now() - ((t % 4) + 1) * 60000} onOpen={noop} fill />
+        <div style={{ display: "flex", gap: 14, padding: "8px 12px", borderTop: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 11 }}>
+          <span style={{ color: C.amber }}>LULD ↑ est {fp(5.11 * 1.1)}</span>
+          <span style={{ color: C.down }}>LULD ↓ est {fp(5.11 * 0.9)}</span>
+          <span style={{ color: C.dim }}>10% band</span>
+        </div>
+      </div>
+    );
+  }
+  if (slide === 3) {
+    const rot = Math.min(2.4, 0.6 + t * 0.15);
+    return (
+      <div style={wrap}>
+        <GainerRow g={OB_ROW({ rotation: rot, dayVol: 8.4e6 * rot })} bars={null} onOpen={noop} fill />
+        {rot >= 1 && (
+          <div style={{ margin: 10, padding: "7px 10px", background: "#231A0A", border: `1px solid ${C.amber}66`, borderRadius: 8 }}>
+            <div style={{ fontFamily: MONO, fontSize: 9, color: C.amber, letterSpacing: 1 }}>🔔 now</div>
+            <div style={{ fontSize: 12, fontWeight: 700 }}>🔄 DMO float rotation {Math.floor(rot)}×</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (slide === 4) {
+    const all = Array.from({ length: 40 }, (_, i) => ({ c: 2 + i * 0.05 + Math.sin(i / 3) * 0.08 }));
+    const n = Math.max(2, Math.min(40, 4 + t * 4));
+    return (
+      <div style={{ ...wrap, padding: "12px 12px 8px" }}>
+        <Spark bars={all.slice(0, n)} up h={56} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.amber }}>▶</span>
+          <div style={{ flex: 1, height: 3, background: C.border, borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ width: "100%", height: "100%", background: C.amber, borderRadius: 2, transform: `scaleX(${n / 40})`, transformOrigin: "left", transition: "transform 600ms linear" }} />
+          </div>
+          <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>{n}/40</span>
+        </div>
+      </div>
+    );
+  }
+  const armed = Math.floor(t / 3) % 2 === 0;
+  return (
+    <div style={{ ...wrap, padding: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontWeight: 800, fontSize: 14 }}>DMO</span>
+        <span style={{ fontFamily: MONO, fontSize: 12, color: C.up }}>+62.4%</span>
+        <div style={{ flex: 1 }} />
+        <span style={{ color: armed ? C.muted : C.dim, opacity: armed ? 1 : 0.55 }}><BellIcon muted={!armed} /></span>
+      </div>
+      <div style={{ marginTop: 10, padding: "9px 11px", background: "#10161E", border: `1px solid ${C.border}`, borderRadius: 10, opacity: armed ? 1 : 0.35, transform: armed ? "translateY(0)" : "translateY(4px)", transition: "opacity 400ms ease, transform 400ms ease" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", fontFamily: MONO, fontSize: 9, color: C.dim }}>
+          <span style={{ width: 8, height: 8, background: C.amber, borderRadius: 2, display: "inline-block" }} />
+          MOMENTUM SCANNER · now
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 700, marginTop: 3 }}>🚨 DMO broke premarket high</div>
+        <div style={{ fontSize: 11, color: C.muted }}>Through PMH $4.61 · now $4.86</div>
+      </div>
+    </div>
+  );
+}
+function OnboardSlides({ mode, onDone, onSkip }) {
+  const [idx, setIdx] = useState(0);
+  const [tick, setTick] = useState(0);
+  const touchRef = useRef(null);
+  const last = idx === OB_SLIDES.length - 1;
+  useEffect(() => {
+    setTick(0);
+    const id = setInterval(() => setTick((x) => x + 1), 700);
+    return () => clearInterval(id);
+  }, [idx]);
+  const go = (d) => setIdx((i) => Math.max(0, Math.min(OB_SLIDES.length - 1, i + d)));
+  return (
+    <div
+      onTouchStart={(e) => { touchRef.current = e.touches[0].clientX; }}
+      onTouchEnd={(e) => {
+        const x0 = touchRef.current;
+        touchRef.current = null;
+        if (x0 == null) return;
+        const dx = e.changedTouches[0].clientX - x0;
+        if (dx < -50) go(1); else if (dx > 50) go(-1);
+      }}
+      style={{ position: "fixed", inset: 0, zIndex: 100, background: C.bg, color: C.text, display: "flex", flexDirection: "column", paddingTop: "calc(14px + env(safe-area-inset-top))", paddingBottom: "calc(14px + env(safe-area-inset-bottom))", fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ display: "flex", alignItems: "center", padding: "0 18px" }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.amber }}>MOMENTUM SCANNER</span>
+        <div style={{ flex: 1 }} />
+        <button onClick={onSkip} style={{ background: "transparent", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: 8 }}>Skip</button>
+      </div>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 22, padding: "0 22px", maxWidth: 560, width: "100%", margin: "0 auto", boxSizing: "border-box", minHeight: 0 }}>
+        <h1 style={{ fontSize: 27, lineHeight: 1.16, fontWeight: 800, margin: 0, whiteSpace: "pre-line" }}>{OB_SLIDES[idx].title}</h1>
+        <ObDemo slide={idx} tick={tick} />
+        <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: 0 }}>{OB_SLIDES[idx].sub}</p>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "8px 22px 0", maxWidth: 560, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
+        <div style={{ display: "flex", gap: 7 }}>
+          {OB_SLIDES.map((_, i) => (
+            <span key={i} onClick={() => setIdx(i)}
+              style={{ width: i === idx ? 18 : 7, height: 7, borderRadius: 4, background: i === idx ? C.amber : C.border, cursor: "pointer", transition: "background 250ms ease" }} />
+          ))}
+        </div>
+        <div style={{ flex: 1 }} />
+        {last ? (
+          <button onClick={onDone}
+            style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 8, padding: "13px 22px", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+            {mode === "help" ? "Done" : "Connect Alpaca →"}
+          </button>
+        ) : (
+          <button onClick={() => go(1)}
+            style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 8, padding: "12px 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+            Next →
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- about & disclosures (moved off the home screen) ---------------- */
+function AboutPage({ onClose }) {
+  const S = ({ title, children }) => (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", marginBottom: 6 }}>{title}</div>
+      <div style={{ fontSize: 13, lineHeight: 1.6, color: C.muted }}>{children}</div>
+    </div>
+  );
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 90, background: C.bg, color: C.text, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "5px 11px", cursor: "pointer", fontSize: 13 }}>←</button>
+        <span style={{ fontSize: 16, fontWeight: 800 }}>How this works</span>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px calc(24px + env(safe-area-inset-bottom))", maxWidth: 640, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
+        <S title="Discovery & ranking">
+          Every listed non-OTC symbol is swept and ranked by setup score: float rotation (volume ÷ float), price vs VWAP, the EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-minute bars, capped day momentum, and 5-minute volume surge — A ≥80 · B ≥65 · C ≥50 · D below.
+        </S>
+        <S title="Sessions">
+          PREMARKET (4:00–9:30 AM ET): live snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% on ≥{fv(PM_MIN_VOL)} premarket shares, resetting each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% with real day volume, prices refreshing every 3 seconds. AFTER HOURS (4:00–8:00 PM ET): a separate full-market table — the top 10 by AH % against the 4:00 close, no percentage floor, illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) excluded, true cumulative AH volume shown.
+        </S>
+        <S title="Row indicators">
+          📰 marks a catalyst headline from the last 48 hours; a red ⚠dil means recent news carries dilution-risk language (offerings, placements, reverse splits). ×F is live float rotation, with alerts at each 1×/2×/3× milestone. ⛔ shows minutes since a suspected halt.
+        </S>
+        <S title="Advanced view">
+          Tap any row for the full chart, live tape and big prints, confluence tracker, estimated LULD halt bands (Tier-2 percentages off the 5-minute average — an estimate, not the official band feed), and ▶ Replay to scrub back through the session's tape. Halt flags are a tape-silence heuristic, not the official LULD feed.
+        </S>
+        <S title="Alerts & push">
+          The bell on each row arms alerts for just that stock — in-app banners plus lock-screen push (mutes reset each new day). Lock-screen push requires the bell enabled and, on iPhone, the app added to the Home Screen; the server must be awake to monitor — keep it pinged or on a paid instance.
+        </S>
+        <S title="Data & keys">
+          Market data comes from your own Alpaca keys, entered in Settings and stored on this device; the push server keeps a copy solely to monitor your watchlist.
+        </S>
+        <S title="Not financial advice">
+          Nothing in this app is investment advice or a recommendation. Small-cap momentum stocks are extremely volatile; most gappers fade. Scores, bands, and flags are heuristics that can be wrong. Trade at your own risk.
+        </S>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- advanced full-screen chart ---------------- */
 const TFS = [
   { key: "1Min", label: "1m", ms: 6e4 },
@@ -1243,6 +1455,30 @@ export default function App() {
   const [haltedSyms, setHaltedSyms] = useState([]);
   const [newsMap, setNewsMap] = useState({}); // sym -> {headline, at, dilution}
   const haltAtRef = useRef({});               // sym -> ms the halt flag was first raised
+  const [onboardOpen, setOnboardOpen] = useState(false);
+  const [onboardMode, setOnboardMode] = useState("first"); // "first" | "help"
+  const [aboutOpen, setAboutOpen] = useState(false);
+
+  /* first-run walkthrough: only on a device with no stored keys yet */
+  useEffect(() => {
+    (async () => {
+      let seen = false, hasKeys = false;
+      try {
+        const os = await window.storage.get("onboard-seen");
+        seen = !!(os && os.value);
+      } catch {}
+      try {
+        const kr = await window.storage.get("alpaca-keys");
+        hasKeys = !!(kr && kr.value);
+      } catch {}
+      if (!seen && !hasKeys) { setOnboardMode("first"); setOnboardOpen(true); }
+    })();
+  }, []);
+  const finishOnboard = useCallback(() => {
+    setOnboardOpen(false);
+    try { window.storage.set("onboard-seen", "1"); } catch (e) {}
+  }, []);
+  const openHelp = useCallback(() => { setOnboardMode("help"); setOnboardOpen(true); }, []);
   const [ahMoves, setAhMoves] = useState([]);
   const [ahInfo, setAhInfo] = useState({}); /* ungated AH stats for main-row chips */
   const [mutedSyms, setMutedSyms] = useState([]); /* mirrors mutedRef for the row bells */
@@ -2098,7 +2334,13 @@ export default function App() {
             </button>
             {err && <div style={{ color: C.down, fontSize: 12, fontFamily: MONO }}>{err}</div>}
           </div>
+          <div style={{ marginTop: 14, display: "flex", gap: 16, fontSize: 12, color: C.dim }}>
+            <span onClick={openHelp} style={{ cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3 }}>▶ Watch the walkthrough</span>
+            <span onClick={() => setAboutOpen(true)} style={{ cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3 }}>ⓘ How this works</span>
+          </div>
         </div>
+        {onboardOpen && <OnboardSlides mode={onboardMode} onDone={finishOnboard} onSkip={finishOnboard} />}
+        {aboutOpen && <AboutPage onClose={() => setAboutOpen(false)} />}
       </div>
     );
   }
@@ -2124,6 +2366,14 @@ export default function App() {
         <button onClick={() => setPaused((p) => !p)}
           style={{ background: paused ? C.up + "22" : "transparent", border: `1px solid ${paused ? C.up : C.border}`, color: paused ? C.up : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
           {paused ? "▶ Resume" : "❚❚ Pause"}
+        </button>
+        <button onClick={openHelp} aria-label="watch the feature walkthrough" title="feature walkthrough"
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
+          ?
+        </button>
+        <button onClick={() => setAboutOpen(true)} aria-label="how this works and disclosures" title="how this works"
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
+          ⓘ
         </button>
         <button onClick={() => { setRunning(false); setPaused(false); }}
           style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>
@@ -2248,10 +2498,15 @@ export default function App() {
           {note}
         </div>
       )}
-      <div style={{ padding: "0 14px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
-        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are shown — no percentage floor, but illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) are excluded and the VOL column is true cumulative AH volume. AH rows re-price on the same 3-second live tick as the main list, and each shows a Trend sparkline of its after-hours tape. Rows carry the latest catalyst headline (📰, red ⚠dil = dilution-risk language in recent news) and live float rotation (×F = day volume ÷ float, with 1×/2×/3× alerts); halted names show minutes since the flag raised. Tap any row to open the Advanced detail view — it adds the full headline, estimated LULD halt bands (Tier-2 assumption off the 5-min average, an estimate, not the official feed), and ▶ Replay to scrub back through the session's tape bar by bar. The small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
+      <div style={{ padding: "2px 14px 18px", color: C.dim, fontSize: 11, fontFamily: MONO }}>
+        Not financial advice ·{" "}
+        <span onClick={() => setAboutOpen(true)} style={{ cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3 }}>
+          ⓘ how this works
+        </span>
       </div>
 
+      {onboardOpen && <OnboardSlides mode={onboardMode} onDone={finishOnboard} onSkip={finishOnboard} />}
+      {aboutOpen && <AboutPage onClose={() => setAboutOpen(false)} />}
       {sel && (
         <AdvancedChart
           symbol={sel.symbol}
