@@ -74,6 +74,14 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   const b1 = await page.textContent('#root');
   console.log(b1.includes('Confluence tracker') ? '✓ tapping a row opens the Advanced view directly' : '✗ Advanced view did not open');
   console.log(b1.includes('Fit all') ? '✓ full chart controls present on the detail page' : '✗ detail controls missing');
+  console.log(b1.includes('LULD') ? '✓ estimated LULD halt bands shown in the stats strip' : '✗ LULD estimate missing');
+  console.log(b1.includes('Replay') ? '✓ tape-replay control present' : '✗ Replay control missing');
+  await page.click('button:has-text("Replay")');
+  await page.waitForTimeout(400);
+  const hasSlider = await page.evaluate(() => !!document.querySelector('input[type="range"]'));
+  console.log(hasSlider ? '✓ replay scrubber appears when Replay is toggled on' : '✗ replay scrubber missing');
+  await page.click('button:has-text("✕ Replay")');
+  await page.waitForTimeout(300);
   console.log(!b1.includes('Advanced view') ? '✓ no intermediate preview step' : '✗ preview card leaked into the flow');
 
   // back button returns to the list

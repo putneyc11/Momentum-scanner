@@ -521,7 +521,10 @@ function BellIcon({ muted }) {
 }
 
 /* ---------------- watchlist row ---------------- */
-function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
+/* catalyst headlines that smell like dilution — flagged in red on the row */
+const DILUTE_RE = /offering|registered direct|private placement|dilut|at-the-market|warrant inducement|reverse split|\bS-1\b|\bS-3\b|prices? public/i;
+
+function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, onMute }) {
   /* Phone metrics (fill): slightly slimmer columns + tighter gaps so the row
      NEVER overflows — overflow is what used to jam the spark flush against
      the row edge with zero padding. The chevron is desktop-only (on phones
@@ -537,8 +540,18 @@ function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
       </span>
       <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick }}>
         {g.symbol}
-        {halted && <span style={{ color: C.down, fontSize: 10, marginLeft: 4 }}>⛔</span>}
+        {halted && (
+          <span style={{ color: C.down, fontSize: 10, marginLeft: 4, fontFamily: MONO }}>
+            ⛔{haltedAt ? `${Math.max(1, Math.round((Date.now() - haltedAt) / 60000))}m` : ""}
+          </span>
+        )}
         {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10, marginLeft: 4 }}>⚠</span>}
+        {news && (
+          /* catalyst attached — full headline lives in the Advanced view */
+          <span title={news.headline} style={{ fontSize: 9, marginLeft: 4, color: news.dilution ? C.down : C.dim, fontWeight: 700 }}>
+            {news.dilution ? "⚠dil" : "📰"}
+          </span>
+        )}
       </span>
       <span style={{ fontFamily: MONO, fontSize: 13, minWidth: w.price }}>{fp(g.price)}</span>
       <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down, minWidth: w.pct }}>
@@ -552,7 +565,15 @@ function GainerRow({ g, bars, halted, onOpen, fill, ah, muted, onMute }) {
           {`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}
         </span>
       )}
-      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>{fv(g.dayVol)}</span>
+      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>
+        {fv(g.dayVol)}
+        {g.rotation != null && g.rotation >= 0.5 && (
+          /* float rotation: cumulative volume ÷ float — the gap trader's #1 stat */
+          <span style={{ display: "block", fontSize: 9, fontWeight: 700, color: g.rotation >= 1 ? C.amber : C.dim }}>
+            {g.rotation.toFixed(1)}×F
+          </span>
+        )}
+      </span>
       <div style={{ flex: 1 }} />
       {bars && bars.length > 1 && <Spark bars={bars} up={g.pct >= 0} h={fill ? 32 : 24} fill={fill} />}
       {onMute && (
@@ -591,7 +612,7 @@ const WINS = [
 const WIN_TF = { "1D": null, "5D": "15Min", "1M": "1Hour", "3M": "1Hour", "6M": "1Day", "1Y": "1Day", "5Y": "1Day" };
 const MAX_BARS = 2000;
 
-function AdvancedChart({ symbol, keys, feed, g, pm, onClose, onAlert }) {
+function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
   const width = useWidth();
   const mobile = width < 720;
   const [tf, setTf] = useState("1Min");
@@ -619,13 +640,44 @@ function AdvancedChart({ symbol, keys, feed, g, pm, onClose, onAlert }) {
   const barsRef = useRef([]);
   barsRef.current = bars;
 
+  const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
+
   const tfObj = TFS.find((t) => t.key === tf);
   const daily = tf === "1Day";
-  const len = bars.length;
+  /* replay mode renders only the tape up to the scrub point */
+  const rBars = useMemo(
+    () => (replay ? bars.slice(0, Math.max(2, Math.min(replay.idx, bars.length))) : bars),
+    [bars, replay]
+  );
+  const len = rBars.length;
   const defC = Math.max(1, len);
   const vc = view ? Math.max(15, Math.min(view.c, len || 1)) : defC;
   const vo = view ? Math.max(0, Math.min(view.o, Math.max(0, len - vc))) : Math.max(0, len - vc);
-  const visBars = useMemo(() => bars.slice(vo, vo + vc), [bars, vo, vc]);
+  const visBars = useMemo(() => rBars.slice(vo, vo + vc), [rBars, vo, vc]);
+
+  /* replay autoplay: one bar per 200ms until the scrub reaches the live edge */
+  useEffect(() => {
+    if (!replay || !replay.playing) return;
+    const id = setInterval(() => {
+      setReplay((r) => {
+        if (!r) return r;
+        const max = barsRef.current.length;
+        return r.idx >= max ? { ...r, playing: false } : { ...r, idx: r.idx + 1 };
+      });
+    }, 200);
+    return () => clearInterval(id);
+  }, [replay && replay.playing]);
+
+  /* LULD band ESTIMATE (Tier-2 assumption): reference = 5-min average price;
+     band 10% ≥$3 · 20% $0.75–3 · 75% below — where the next halt would arm */
+  const luld = useMemo(() => {
+    if (tf !== "1Min" || bars.length < 5) return null;
+    const last5 = bars.slice(-5);
+    const ref = last5.reduce((a, b) => a + b.c, 0) / last5.length;
+    const p = last5[last5.length - 1].c;
+    const band = p >= 3 ? 10 : p >= 0.75 ? 20 : 75;
+    return { up: ref * (1 + band / 100), dn: Math.max(0.01, ref * (1 - band / 100)), band };
+  }, [bars, tf]);
 
   /* bars */
   useEffect(() => {
@@ -1028,8 +1080,41 @@ function AdvancedChart({ symbol, keys, feed, g, pm, onClose, onAlert }) {
           style={{ background: following ? "transparent" : C.amber + "22", border: `1px solid ${following ? C.border : C.amber}`, color: following ? C.dim : C.amber, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
           ⟲ Fit all
         </button>
+        <button
+          onClick={() => setReplay((r) => (r ? null : { idx: Math.max(2, Math.floor(barsRef.current.length / 4)), playing: false }))}
+          style={{ background: replay ? C.amber + "22" : "transparent", border: `1px solid ${replay ? C.amber : C.border}`, color: replay ? C.amber : C.dim, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
+          {replay ? "✕ Replay" : "▶ Replay"}
+        </button>
         {err && <span style={{ color: C.down, fontSize: 11, fontFamily: MONO }}>{err}</span>}
       </div>
+      {replay && (
+        /* TAPE REPLAY: scrub the session bar by bar, or press play */
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", borderBottom: `1px solid ${C.border}`, background: C.amber + "0D" }}>
+          <button
+            onClick={() => setReplay((r) => r && { ...r, playing: !r.playing })}
+            style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 6, padding: "3px 10px", fontFamily: MONO, fontSize: 11, cursor: "pointer", flexShrink: 0 }}>
+            {replay.playing ? "❚❚" : "▶"}
+          </button>
+          <input
+            type="range" min={2} max={Math.max(2, bars.length)} value={Math.min(replay.idx, bars.length)}
+            onChange={(e) => setReplay((r) => r && { ...r, idx: Number(e.target.value), playing: false })}
+            style={{ flex: 1, accentColor: C.amber }}
+          />
+          <span style={{ fontFamily: MONO, fontSize: 10, color: C.amber, whiteSpace: "nowrap" }}>
+            {rBars.length ? `${ftime(rBars[rBars.length - 1].t)} ET` : ""} · {Math.min(replay.idx, bars.length)}/{bars.length}
+          </span>
+        </div>
+      )}
+      {news && (
+        /* the catalyst behind the move — why it's up, not just how much */
+        <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.muted, minWidth: 0 }}>
+          {news.dilution && (
+            <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>DILUTION RISK</span>
+          )}
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📰 {news.headline}</span>
+          <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h ago</span>
+        </div>
+      )}
       <div style={{ flex: 1, display: "flex", flexDirection: mobile ? "column" : "row", minHeight: 0, overflowY: mobile ? "auto" : "hidden" }}>
         <div style={{ flex: mobile ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, overflowY: mobile ? "visible" : "auto" }}>
           <div style={{ position: "relative", flex: mobile ? "0 0 auto" : "0 0 52%", height: mobile ? "34vh" : "auto", minHeight: mobile ? 220 : 300 }}>
@@ -1058,6 +1143,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, onClose, onAlert }) {
             <StatCell label="Day high" value={calc ? fp(calc.dayHi) : "—"} color={C.up} />
             <StatCell label="Day low" value={calc ? fp(calc.dayLo) : "—"} color={C.down} />
             <StatCell label="Float" value={flt ? fv(flt) : "—"} />
+            <StatCell label={luld ? `LULD ↑ est ${luld.band}%` : "LULD ↑ est"} value={luld ? fp(luld.up) : "—"} color={C.amber} />
+            <StatCell label={luld ? `LULD ↓ est ${luld.band}%` : "LULD ↓ est"} value={luld ? fp(luld.dn) : "—"} color={C.down} />
             <StatCell label="PM high" value={calc && calc.pmH != null ? fp(calc.pmH) : "—"} color={C.amber} />
             <StatCell label="PM low" value={calc && calc.pmL != null ? fp(calc.pmL) : "—"} />
             <StatCell label="EMA 8" value={calc ? fp(calc.e8Now) : "—"} color={C.ema8} />
@@ -1154,6 +1241,8 @@ export default function App() {
   const bannerTouchRef = useRef(null);
   const [pushWarn, setPushWarn] = useState(false);
   const [haltedSyms, setHaltedSyms] = useState([]);
+  const [newsMap, setNewsMap] = useState({}); // sym -> {headline, at, dilution}
+  const haltAtRef = useRef({});               // sym -> ms the halt flag was first raised
   const [ahMoves, setAhMoves] = useState([]);
   const [ahInfo, setAhInfo] = useState({}); /* ungated AH stats for main-row chips */
   const [mutedSyms, setMutedSyms] = useState([]); /* mirrors mutedRef for the row bells */
@@ -1702,6 +1791,9 @@ export default function App() {
           if (!newHalt.includes(s) && listSet.has(s) && !mutedRef.current.has(s))
             alertOnce(`${s}-resume-${hr2}`, `▶ ${s} trading again`, "Prints resumed after the pause");
       }
+      /* halt timers: stamp when a flag first raises, clear on resume */
+      for (const s of newHalt) if (!haltRef.current.has(s)) haltAtRef.current[s] = Date.now();
+      for (const s of haltRef.current) if (!newHalt.includes(s)) delete haltAtRef.current[s];
       haltRef.current = new Set(newHalt);
       setHaltedSyms(newHalt);
       /* AH TABLE: ALWAYS the top 10 by AH % across the whole market — no
@@ -1823,8 +1915,13 @@ export default function App() {
         watchAllRef.current = watchAllRef.current.filter((s) => pmVol[s] == null || pmVol[s] >= PM_MIN_VOL);
       }
       for (const g of pool) {
-        const sc = setupScore(g, bm[g.symbol], getFloat(g.symbol));
+        const flVal = getFloat(g.symbol);
+        const sc = setupScore(g, bm[g.symbol], flVal);
         g.score = sc.score; g.grade = sc.grade; g.rotation = sc.rotation;
+        /* float-rotation milestones: alert once per level per day (1x, 2x, 3x…) */
+        const rotM = Math.floor(g.rotation || 0);
+        if (rotM >= 1 && rotM <= 10 && alertsOnRef.current && !mutedRef.current.has(g.symbol))
+          alertOnce(`${g.symbol}-rot${rotM}`, `🔄 ${g.symbol} float rotation ${rotM}×`, `${fv(g.dayVol)} traded vs ${fv(flVal)} float @ $${fp(g.price)}`);
       }
       pool.sort((a, b) => b.score - a.score || b.pct - a.pct);
       const top = pool.slice(0, 15);
@@ -1848,8 +1945,40 @@ export default function App() {
     } finally {
       busy.current = false;
     }
-  }, [keys, maxPrice, feed, minDayVol, getFloat, syncWatch]);
+  }, [keys, maxPrice, feed, minDayVol, getFloat, syncWatch, alertOnce]);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+
+  /* CATALYST TAGGING: Alpaca's news feed, one batched call a minute for the
+     listed symbols — latest headline per symbol + a dilution-risk flag */
+  const newsTick = useCallback(async () => {
+    const syms = [...new Set([...gainersRef.current.map((x) => x.symbol), ...ahRef.current])].slice(0, 40);
+    if (syms.length === 0) return;
+    try {
+      const j = await alpaca("/v1beta1/news", { symbols: syms.join(","), limit: 50 }, keys);
+      const items = j.news || [];
+      if (!Array.isArray(items)) return;
+      setNewsMap((prev) => {
+        const map = { ...prev };
+        for (const n of items) {
+          const at = new Date(n.created_at || n.updated_at || 0).getTime();
+          if (!at || Date.now() - at > 48 * 3600e3) continue; /* stale news is noise */
+          const dil = DILUTE_RE.test(n.headline || "");
+          for (const s of n.symbols || []) {
+            if (!syms.includes(s)) continue;
+            if (!map[s] || at > map[s].at) map[s] = { headline: n.headline, at, dilution: dil || (map[s] ? map[s].dilution : false) };
+            else if (dil) map[s] = { ...map[s], dilution: true };
+          }
+        }
+        return map;
+      });
+    } catch (e) {}
+  }, [keys]);
+  useEffect(() => {
+    if (!running || paused) return;
+    newsTick();
+    const id = setInterval(newsTick, 60000);
+    return () => clearInterval(id);
+  }, [running, paused, newsTick]);
   useEffect(() => {
     if (!running || paused) return;
     refresh();
@@ -2088,7 +2217,7 @@ export default function App() {
           </div>
         )}
         {gainers.map((g) => (
-          <GainerRow key={g.symbol} g={g} bars={barsMap[g.symbol]} halted={haltedSyms.includes(g.symbol)} onOpen={openAdvanced} fill={mobile} ah={ahInfo[g.symbol]} muted={mutedSyms.includes(g.symbol)} onMute={toggleMute} />
+          <GainerRow key={g.symbol} g={g} bars={barsMap[g.symbol]} halted={haltedSyms.includes(g.symbol)} haltedAt={haltAtRef.current[g.symbol]} news={newsMap[g.symbol]} onOpen={openAdvanced} fill={mobile} ah={ahInfo[g.symbol]} muted={mutedSyms.includes(g.symbol)} onMute={toggleMute} />
         ))}
       </div>
 
@@ -2108,7 +2237,7 @@ export default function App() {
             <span>Trend</span>
           </div>
           {ahMoves.map((r) => (
-            <GainerRow key={r.symbol} g={r} bars={r.bars} halted={haltedSyms.includes(r.symbol)} onOpen={openAdvanced} fill={mobile} muted={mutedSyms.includes(r.symbol)} onMute={toggleMute} />
+            <GainerRow key={r.symbol} g={r} bars={r.bars} halted={haltedSyms.includes(r.symbol)} haltedAt={haltAtRef.current[r.symbol]} news={newsMap[r.symbol]} onOpen={openAdvanced} fill={mobile} muted={mutedSyms.includes(r.symbol)} onMute={toggleMute} />
           ))}
         </div>
       )}
@@ -2120,7 +2249,7 @@ export default function App() {
         </div>
       )}
       <div style={{ padding: "0 14px 18px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
-        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are shown — no percentage floor, but illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) are excluded and the VOL column is true cumulative AH volume. AH rows re-price on the same 3-second live tick as the main list, and each shows a Trend sparkline of its after-hours tape. Tap any row to open the Advanced detail view; the small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
+        Ranked by setup score: float rotation (vol ÷ float), price vs VWAP, EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-min, capped day momentum, and 5-min volume surge — A ≥80 · B ≥65 · C ≥50 · D below. PREMARKET (4:00–9:30 AM ET): the sweep reads live premarket snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% carrying ≥{fv(PM_MIN_VOL)} premarket shares, and resets for each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% today with ≥{fv(minDayVol)} day volume (split-adjusted), from a sweep of all listed non-OTC symbols; prices refresh every 3s. The After Hours table (4:00–8:00 PM ET) is fully separate and FULL-MARKET: every listed symbol that prints after the close is ranked vs the 4:00 close and the top 10 by AH % are shown — no percentage floor, but illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) are excluded and the VOL column is true cumulative AH volume. AH rows re-price on the same 3-second live tick as the main list, and each shows a Trend sparkline of its after-hours tape. Rows carry the latest catalyst headline (📰, red ⚠dil = dilution-risk language in recent news) and live float rotation (×F = day volume ÷ float, with 1×/2×/3× alerts); halted names show minutes since the flag raised. Tap any row to open the Advanced detail view — it adds the full headline, estimated LULD halt bands (Tier-2 assumption off the 5-min average, an estimate, not the official feed), and ▶ Replay to scrub back through the session's tape bar by bar. The small bell on each row turns alerts on/off for just that stock (both in-app and lock-screen push — mutes reset each new day). Halt flags are a tape-silence heuristic, not the official LULD feed. Lock-screen push requires the bell enabled and (on iPhone) the app added to the Home Screen; the Render server must be awake to monitor — keep it pinged or on a paid instance. Not financial advice.
       </div>
 
       {sel && (
@@ -2130,6 +2259,7 @@ export default function App() {
           feed={feed}
           g={sel}
           pm={pmMap[sel.symbol]}
+          news={newsMap[sel.symbol]}
           onClose={() => setSelected(null)}
           onAlert={chartAlert}
         />
