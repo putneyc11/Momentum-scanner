@@ -281,10 +281,13 @@ function setupScore(g, bars5, floatShares) {
 const gradeColor = (gr) => (gr === "A" ? C.up : gr === "B" ? C.amber : gr === "C" ? C.muted : C.down);
 
 /* ---------------- Alpaca fetch ---------------- */
+/* stable anonymous device identity — the server-keys proxy gate and the
+   per-device watchlist/push routing key off this */
+const DEVICE = { id: "" };
 async function req(base, path, params, keys) {
   const qs = new URLSearchParams(params).toString();
   const r = await fetch(`${base}${path}${qs ? "?" + qs : ""}`, {
-    headers: { "APCA-API-KEY-ID": keys.id.trim(), "APCA-API-SECRET-KEY": keys.secret.trim() },
+    headers: { "APCA-API-KEY-ID": keys.id.trim(), "APCA-API-SECRET-KEY": keys.secret.trim(), ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}) },
   });
   if (!r.ok) {
     const t = await r.text().catch(() => "");
@@ -1458,6 +1461,59 @@ export default function App() {
   const [onboardOpen, setOnboardOpen] = useState(false);
   const [onboardMode, setOnboardMode] = useState("first"); // "first" | "help"
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [srvCfg, setSrvCfg] = useState(null); // {serverKeys, invite, feed} — server-held-keys mode
+  const [invite, setInvite] = useState("");
+
+  /* server mode discovery + a stable per-device id */
+  useEffect(() => {
+    fetch("/config").then((r) => r.json()).then((c) => setSrvCfg(c || { serverKeys: false }))
+      .catch(() => setSrvCfg({ serverKeys: false }));
+    (async () => {
+      let id = null;
+      try {
+        const dr = await window.storage.get("device-id");
+        if (dr && dr.value) id = dr.value;
+      } catch {}
+      if (!id) {
+        id = "dv" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+        try { window.storage.set("device-id", id); } catch (e) {}
+      }
+      DEVICE.id = id;
+    })();
+  }, []);
+
+  /* keyless connect: claim this device with the access code, then run */
+  const connectServer = useCallback(async () => {
+    setErr("");
+    try {
+      const r = await fetch("/auth/claim", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: invite.trim(), device: DEVICE.id }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || "access denied");
+      const sv = { id: "server", secret: "server", code: invite.trim(), feed: (srvCfg && srvCfg.feed) || "sip", maxPrice, minDayVol, ver: 3 };
+      setKeys({ id: "server", secret: "server", code: sv.code });
+      setFeed(sv.feed);
+      try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}
+      setRunning(true);
+    } catch (e) { setErr(String(e.message || e)); }
+  }, [invite, srvCfg, maxPrice, minDayVol]);
+
+  /* the server's device store is ephemeral across deploys — re-claim
+     silently on boot so a running device never gets locked out */
+  useEffect(() => {
+    if (!srvCfg || !srvCfg.serverKeys || !running || keys.id !== "server") return;
+    const t = setTimeout(() => {
+      try {
+        fetch("/auth/claim", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: keys.code || "", device: DEVICE.id }),
+        }).catch(() => {});
+      } catch (e) {}
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [srvCfg, running, keys]);
 
   /* first-run walkthrough: only on a device with no stored keys yet */
   useEffect(() => {
@@ -1524,7 +1580,7 @@ export default function App() {
     try {
       fetch("/push/watchlist", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40) }),
+        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined }),
       }).catch(() => {});
     } catch (e) {}
   }, []);
@@ -1636,7 +1692,7 @@ export default function App() {
           const sub = reg && (await reg.pushManager.getSubscription());
           if (sub) { endpoint = sub.endpoint; try { await sub.unsubscribe(); } catch (e) {} }
         }
-        await fetch("/push/unregister", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint }) });
+        await fetch("/push/unregister", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint, device: DEVICE.id || undefined }) });
       } catch (e) {}
       return;
     }
@@ -1658,7 +1714,7 @@ export default function App() {
           await fetch("/push/register", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ subscription: sub, keys, feed }),
+            body: JSON.stringify({ subscription: sub, keys, feed, device: DEVICE.id || undefined }),
           });
           armed = true;
         }
@@ -2303,35 +2359,63 @@ export default function App() {
             push alerts via the server monitor.
           </p>
           <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
-            <label style={labStyle}>API key ID
-              <input value={keys.id} onChange={(e) => setKeys((k) => ({ ...k, id: e.target.value }))} style={inputStyle} />
-            </label>
-            <label style={labStyle}>API secret
-              <input type="password" value={keys.secret} onChange={(e) => setKeys((k) => ({ ...k, secret: e.target.value }))} style={inputStyle} />
-            </label>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <label style={labStyle}>Max price ($)
-                <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={inputStyle} />
-              </label>
-              <label style={labStyle}>Min day volume
-                <input type="number" value={minDayVol} onChange={(e) => setMinDayVol(e.target.value)} style={inputStyle} />
-              </label>
-            </div>
-            <label style={labStyle}>Data feed
-              <select value={feed} onChange={(e) => setFeed(e.target.value)} style={inputStyle}>
-                <option value="sip">SIP real-time, full market (paid Algo Trader Plus)</option>
-                <option value="sip_delayed">Full market, 15-min delayed (free)</option>
-                <option value="iex">IEX real-time (free — partial volume)</option>
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.muted, cursor: "pointer" }}>
-              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-              Remember keys on this device
-            </label>
-            <button onClick={connect}
-              style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 6, padding: "12px 0", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
-              Start scanning
-            </button>
+            {srvCfg && srvCfg.serverKeys ? (
+              /* SERVER-KEYS MODE: live data is included — no API keys, ever */
+              <>
+                <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.5 }}>
+                  <span style={{ color: C.up, fontWeight: 700 }}>✓ Live market data included</span> — no API keys needed on this server.
+                </div>
+                {srvCfg.invite && (
+                  <label style={labStyle}>Access code
+                    <input value={invite} onChange={(e) => setInvite(e.target.value)} autoCapitalize="none" style={inputStyle} />
+                  </label>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <label style={labStyle}>Max price ($)
+                    <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={inputStyle} />
+                  </label>
+                  <label style={labStyle}>Min day volume
+                    <input type="number" value={minDayVol} onChange={(e) => setMinDayVol(e.target.value)} style={inputStyle} />
+                  </label>
+                </div>
+                <button onClick={connectServer}
+                  style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 6, padding: "12px 0", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+                  Start scanning
+                </button>
+              </>
+            ) : (
+              <>
+                <label style={labStyle}>API key ID
+                  <input value={keys.id} onChange={(e) => setKeys((k) => ({ ...k, id: e.target.value }))} style={inputStyle} />
+                </label>
+                <label style={labStyle}>API secret
+                  <input type="password" value={keys.secret} onChange={(e) => setKeys((k) => ({ ...k, secret: e.target.value }))} style={inputStyle} />
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <label style={labStyle}>Max price ($)
+                    <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={inputStyle} />
+                  </label>
+                  <label style={labStyle}>Min day volume
+                    <input type="number" value={minDayVol} onChange={(e) => setMinDayVol(e.target.value)} style={inputStyle} />
+                  </label>
+                </div>
+                <label style={labStyle}>Data feed
+                  <select value={feed} onChange={(e) => setFeed(e.target.value)} style={inputStyle}>
+                    <option value="sip">SIP real-time, full market (paid Algo Trader Plus)</option>
+                    <option value="sip_delayed">Full market, 15-min delayed (free)</option>
+                    <option value="iex">IEX real-time (free — partial volume)</option>
+                  </select>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.muted, cursor: "pointer" }}>
+                  <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                  Remember keys on this device
+                </label>
+                <button onClick={connect}
+                  style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 6, padding: "12px 0", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+                  Start scanning
+                </button>
+              </>
+            )}
             {err && <div style={{ color: C.down, fontSize: 12, fontFamily: MONO }}>{err}</div>}
           </div>
           <div style={{ marginTop: 14, display: "flex", gap: 16, fontSize: 12, color: C.dim }}>
