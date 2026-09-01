@@ -84,6 +84,21 @@ function bars1(n) { const a = []; for (let i = 0; i < n; i++) { const c = 1 + i 
   await page.click('button:has-text("Done")');
   await page.waitForTimeout(300);
   console.log(!(await page.textContent('#root')).includes('Your alerts, your rules') ? '✓ Done returns to the live app' : '✗ walkthrough stuck open');
+
+  /* ---- C) server-keys mode: the connect screen asks for an access code, never keys ---- */
+  await page.route('**/config', (r) => r.fulfill({ json: { serverKeys: true, invite: true, feed: 'sip' } }));
+  let claimed = null;
+  await page.route('**/auth/claim', (r) => { claimed = JSON.parse(r.request().postData() || '{}'); r.fulfill({ json: { ok: true } }); });
+  await page.evaluate(() => localStorage.removeItem('alpaca-keys'));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(900);
+  const c0 = await page.textContent('#root');
+  console.log(c0.includes('Live market data included') && c0.includes('Access code') ? '✓ server-keys mode: connect screen offers an access code, data included' : '✗ server-mode connect screen wrong');
+  console.log(!c0.includes('API key ID') ? '✓ …and never asks for API keys' : '✗ key fields still shown in server mode');
+  await page.fill('input[autocapitalize="none"]', 'letmein');
+  await page.click('button:has-text("Start scanning")');
+  await page.waitForSelector('span:has-text("GOODA")', { timeout: 15000 });
+  console.log(claimed && claimed.code === 'letmein' && /^dv/.test(claimed.device || '') ? '✓ Start claims the device with the code + a stable device id' : '✗ claim payload wrong: ' + JSON.stringify(claimed));
   console.log('JS errors:', errors.length ? errors : 'none');
   await browser.close();
   process.exit(errors.length ? 1 : 0);

@@ -18,9 +18,24 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 8787;
-const DATA = "https://data.alpaca.markets";
-const ROUTES = { "/alpaca": DATA, "/trading": "https://paper-api.alpaca.markets" };
+/* upstream feed is overridable so the whole stack stays feed-agnostic —
+   swapping Alpaca for a licensed vendor later is an env change here */
+const DATA = process.env.ALPACA_DATA_URL || "https://data.alpaca.markets";
+const TRADING = process.env.ALPACA_TRADING_URL || "https://paper-api.alpaca.markets";
+const ROUTES = { "/alpaca": DATA, "/trading": TRADING };
 const SUBS_FILE = "/tmp/scanner-subs.json";
+const DEVICES_FILE = "/tmp/scanner-devices.json";
+
+/* SERVER-KEYS MODE (Phase 1 of the App Store plan): when both APCA_* env
+   vars are set on the server, users never enter API keys — the proxy
+   injects the server's credentials, access is gated by an invite code plus
+   a per-device id, and each device keeps its own watchlist + push routing.
+   With the env vars unset, everything behaves exactly as before (each
+   client brings its own keys). */
+const SERVER_KEYS = !!(process.env.APCA_API_KEY_ID && process.env.APCA_API_SECRET_KEY);
+const INVITE_CODE = process.env.INVITE_CODE || "";
+const SERVER_FEED = process.env.SERVER_FEED === "iex" ? "iex" : "sip";
+const MAX_DEVICES = Number(process.env.MAX_DEVICES || 500);
 const OPEN_ET_MIN = 9 * 60 + 30;
 
 /* ============================ small utils ============================ */
@@ -143,6 +158,30 @@ async function broadcast(title, bodyTxt, key) {
     if (code === 404 || code === 410) dead.push(s.sub.endpoint);
   }
   if (dead.length) { subs = subs.filter((s) => !dead.includes(s.sub.endpoint)); saveSubs(); }
+}
+
+/* ============================ per-device accounts (server-keys mode) ==== */
+let devices = {}; // id -> { symbols: [], sub: push subscription|null, t }
+try { devices = JSON.parse(fs.readFileSync(DEVICES_FILE, "utf8")) || {}; } catch (e) {}
+function saveDevices() { try { fs.writeFileSync(DEVICES_FILE, JSON.stringify(devices)); } catch (e) {} }
+const deviceOk = (id) => !!(id && typeof id === "string" && devices[id]);
+function watchUnion() {
+  const set = new Set(watch);
+  for (const d of Object.values(devices)) for (const s of d.symbols || []) set.add(s);
+  return [...set];
+}
+/* route an alert by INTEREST: the legacy shared list broadcasts as before;
+   claimed devices are pushed only for symbols on their own watchlist */
+async function sendAlert(sym, title, bodyTxt, key) {
+  if (watch.includes(sym)) await broadcast(title, bodyTxt, key);
+  let changed = false;
+  for (const d of Object.values(devices)) {
+    if (!d.sub || !(d.symbols || []).includes(sym)) continue;
+    const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
+    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
+    if (code === 404 || code === 410) { d.sub = null; changed = true; }
+  }
+  if (changed) saveDevices();
 }
 
 /* ============================ float lookup ============================ */
@@ -300,15 +339,22 @@ function saveMonState() {
   } catch (e) {}
 }
 async function monitorTick() {
-  if (subs.length === 0) return;
-  const cfg = subs[subs.length - 1]; // latest registration carries the API keys
-  const H = { "APCA-API-KEY-ID": cfg.keys.id, "APCA-API-SECRET-KEY": cfg.keys.secret };
-  const feed = cfg.feed === "sip" ? "sip" : "iex"; // real-time only for triggers
+  let H, feed;
+  if (SERVER_KEYS) {
+    if (subs.length === 0 && !Object.values(devices).some((d) => d.sub)) return;
+    H = { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY };
+    feed = SERVER_FEED;
+  } else {
+    if (subs.length === 0) return;
+    const cfg = subs[subs.length - 1]; // latest registration carries the API keys
+    H = { "APCA-API-KEY-ID": cfg.keys.id, "APCA-API-SECRET-KEY": cfg.keys.secret };
+    feed = cfg.feed === "sip" ? "sip" : "iex"; // real-time only for triggers
+  }
   const day = etDay(Date.now());
   if (monState.day !== day) { monState.fired = new Set(); monState.sym = {}; monState.day = day; }
   try {
-    /* monitor is scoped to the app's synced watchlist — nothing else */
-    const pool = watch.slice(0, 40);
+    /* monitor covers the shared list plus every claimed device's list */
+    const pool = (SERVER_KEYS ? watchUnion() : watch).slice(0, SERVER_KEYS ? 80 : 40);
     if (pool.length === 0) return;
     const off = new Date();
     const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
@@ -329,7 +375,7 @@ async function monitorTick() {
           if (monState.fired.has(trig.key)) continue;
           monState.fired.add(trig.key);
           console.log("PUSH:", trig.title);
-          await broadcast(trig.title, trig.body, trig.key);
+          await sendAlert(s, trig.title, trig.body, trig.key);
         }
       }
     }
@@ -407,9 +453,20 @@ const server = http.createServer(async (req, res) => {
 
   const prefix = Object.keys(ROUTES).find((p) => req.url.startsWith(p + "/"));
   if (prefix) {
+    /* server-keys mode: the server's own credentials go upstream, and (when
+       an invite code is configured) only claimed devices may use the proxy —
+       otherwise anyone with the URL gets free market data on our dime */
+    if (SERVER_KEYS && INVITE_CODE && !deviceOk(req.headers["x-device"])) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "device not authorized — enter the access code" }));
+      return;
+    }
     try {
       const r = await fetch(ROUTES[prefix] + req.url.slice(prefix.length), {
-        headers: {
+        headers: SERVER_KEYS ? {
+          "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID,
+          "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY,
+        } : {
           "APCA-API-KEY-ID": req.headers["apca-api-key-id"] || "",
           "APCA-API-SECRET-KEY": req.headers["apca-api-secret-key"] || "",
         },
@@ -429,6 +486,33 @@ const server = http.createServer(async (req, res) => {
   if (u === "/manifest.json") { res.writeHead(200, { "Content-Type": "application/manifest+json" }); res.end(MANIFEST); return; }
   if (u === "/icon.png") { res.writeHead(200, { "Content-Type": "image/png" }); res.end(ICON); return; }
 
+  if (u === "/config" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ serverKeys: SERVER_KEYS, invite: !!INVITE_CODE, feed: SERVER_FEED }));
+    return;
+  }
+  if (u === "/auth/claim" && req.method === "POST") {
+    try {
+      if (!SERVER_KEYS) throw new Error("server-keys mode is off");
+      const b = JSON.parse(await readBody(req));
+      const id = String(b.device || "");
+      if (id.length < 8 || id.length > 64) throw new Error("bad device id");
+      if (INVITE_CODE && String(b.code || "") !== INVITE_CODE) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "wrong access code" }));
+        return;
+      }
+      if (!devices[id] && Object.keys(devices).length >= MAX_DEVICES) throw new Error("device limit reached");
+      devices[id] = devices[id] || { symbols: [], sub: null, t: Date.now() };
+      saveDevices();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e.message || e) }));
+    }
+    return;
+  }
   if (u === "/settings" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(settings));
@@ -437,6 +521,7 @@ const server = http.createServer(async (req, res) => {
   if (u === "/settings" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
+      if (SERVER_KEYS) { delete b.id; delete b.secret; } /* never store client keys in server-keys mode */
       settings = { ...settings, ...b };
       saveSettings();
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -448,8 +533,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (u === "/push/status") {
+    const devSubs = Object.values(devices).filter((d) => d.sub).length;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ devices: subs.length, watch: watch.length, lastError: lastPushErr }));
+    res.end(JSON.stringify({ devices: subs.length + devSubs, watch: (SERVER_KEYS ? watchUnion() : watch).length, lastError: lastPushErr }));
     return;
   }
   if (u === "/push/pubkey") {
@@ -461,6 +547,16 @@ const server = http.createServer(async (req, res) => {
     try {
       const b = JSON.parse(await readBody(req));
       if (!b.subscription || !b.subscription.endpoint) throw new Error("bad subscription");
+      if (SERVER_KEYS && b.device) {
+        /* per-device: this device's subscription only (must be claimed) */
+        if (!deviceOk(b.device)) throw new Error("device not authorized");
+        devices[b.device].sub = b.subscription;
+        saveDevices();
+        console.log("push registered for device — devices with push:", Object.values(devices).filter((d) => d.sub).length);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, devices: 1 }));
+        return;
+      }
       /* single-user app: a new registration replaces ALL prior subscriptions.
          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
       subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
@@ -477,7 +573,16 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/watchlist" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
-      watch = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 40);
+      const syms = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 40);
+      if (SERVER_KEYS && b.device) {
+        if (!deviceOk(b.device)) throw new Error("device not authorized");
+        devices[b.device].symbols = syms; /* this device's own watchlist */
+        saveDevices();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, watching: syms.length }));
+        return;
+      }
+      watch = syms;
       saveSubs();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));
@@ -490,6 +595,13 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/unregister" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
+      if (SERVER_KEYS && b.device && devices[b.device]) {
+        devices[b.device].sub = null; /* this device only */
+        saveDevices();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, devices: 0 }));
+        return;
+      }
       if (b.endpoint) subs = subs.filter((s) => s.sub.endpoint !== b.endpoint);
       else subs = []; /* single-user app: bell off = full silence */
       saveSubs();

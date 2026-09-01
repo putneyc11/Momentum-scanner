@@ -1,5 +1,13 @@
 # Tests (representative subset)
 
+- test-serverkeys.js — server unit: SERVER-KEYS mode (env-held credentials,
+                   invite gate, per-device watchlists, proxy injection,
+                   legacy passthrough). Run with server.js in the same
+                   directory: `cp ../deploy/server.js . && node test-serverkeys.js`
+- test-onboard.js — Playwright UI: first-run walkthrough, About page,
+                   relocated disclosures, and the server-keys connect
+                   screen (access code, no key fields).
+
 - test-dup.js    — server unit: every duplicate-notification scenario (subscription
                    replacement, unified volume alert, bar consumption, cooldowns,
                    baseline swallowing). Run with server.js in the same directory:

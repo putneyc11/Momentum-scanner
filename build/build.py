@@ -82,6 +82,17 @@ REPS = [
       try { hasKeys = !!localStorage.getItem("alpaca-keys"); } catch {}'''),
     ('try { window.storage.set("onboard-seen", "1"); } catch (e) {}',
      'try { localStorage.setItem("onboard-seen", "1"); } catch (e) {}'),
+    ('''      let id = null;
+      try {
+        const dr = await window.storage.get("device-id");
+        if (dr && dr.value) id = dr.value;
+      } catch {}''',
+     '''      let id = null;
+      try { id = localStorage.getItem("device-id"); } catch {}'''),
+    ('try { window.storage.set("device-id", id); } catch (e) {}',
+     'try { localStorage.setItem("device-id", id); } catch (e) {}'),
+    ('try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}',
+     'try { localStorage.setItem("alpaca-keys", JSON.stringify(sv)); } catch (e) {}'),
     ('export default function App()', 'function App()'),
 ]
 
