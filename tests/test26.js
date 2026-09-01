@@ -73,9 +73,25 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.waitForSelector('text=Confluence tracker', { timeout: 15000 });
   const b1 = await page.textContent('#root');
   console.log(b1.includes('Confluence tracker') ? '✓ tapping a row opens the Advanced view directly' : '✗ Advanced view did not open');
-  console.log(b1.includes('Fit all') ? '✓ full chart controls present on the detail page' : '✗ detail controls missing');
+  console.log(b1.includes('⟲') ? '✓ icon-only fit-all control present' : '✗ fit-all control missing');
   console.log(b1.includes('LULD') ? '✓ estimated LULD halt bands shown in the stats strip' : '✗ LULD estimate missing');
   console.log(b1.includes('Replay') ? '✓ tape-replay control present' : '✗ Replay control missing');
+  console.log(b1.includes("Today's numbers") ? '✓ stats section carries its title' : '✗ stats title missing');
+  console.log(b1.includes('Alerts for GOODA') ? '✓ per-ticker alert customization section present' : '✗ alerts section missing');
+  console.log(b1.includes('Copy') && b1.includes('Save') ? '✓ chart snapshot Copy/Save live in the news bar' : '✗ snapshot buttons missing');
+  // add a price-cross level
+  await page.fill('input[placeholder="price"]', '2.50');
+  await page.click('button:has-text("+ Add level")');
+  await page.waitForTimeout(400);
+  const bLvl = await page.textContent('#root');
+  console.log(bLvl.includes('$2.50') ? '✓ price-cross alert level added (chip shown, max 15)' : '✗ level chip missing');
+  const storedPrefs = await page.evaluate(() => localStorage.getItem('alert-prefs'));
+  console.log(storedPrefs && storedPrefs.includes('2.5') ? '✓ level persisted to alert-prefs storage' : '✗ prefs not persisted: ' + JSON.stringify(storedPrefs));
+  // switch one alert category off for this ticker
+  await page.click('button:has-text("VWAP reclaim")');
+  await page.waitForTimeout(300);
+  const storedPrefs2 = await page.evaluate(() => JSON.parse(localStorage.getItem('alert-prefs') || '{}'));
+  console.log(storedPrefs2.GOODA && storedPrefs2.GOODA.off && storedPrefs2.GOODA.off.includes('vwap') ? '✓ per-ticker category toggle persists (vwap off for GOODA)' : '✗ category toggle not stored');
   await page.click('button:has-text("Replay")');
   await page.waitForTimeout(400);
   const hasSlider = await page.evaluate(() => !!document.querySelector('input[type="range"]'));
