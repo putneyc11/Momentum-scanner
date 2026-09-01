@@ -143,12 +143,23 @@ function sendPush(sub, payloadObj) {
 /* ============================ subscriptions ============================ */
 let subs = [];   // [{ sub, keys:{id,secret}, feed }]
 let watch = [];  // the app's current ranked list — the ONLY symbols monitored
+let watchPrefs = {}; // sym -> { off: [cats], lv: [price levels] } — per-ticker alert prefs
 try {
   const saved = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
   if (Array.isArray(saved)) subs = saved;
-  else { subs = saved.subs || []; watch = saved.watch || []; }
+  else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; }
 } catch (e) {}
-function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch })); } catch (e) {} }
+function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs })); } catch (e) {} }
+
+/* per-ticker alert-category filtering: the alert key encodes its category */
+const CAT_MARKS = [["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
+function catOf(key) { for (const [c, m] of CAT_MARKS) if (key.includes(m)) return c; return null; }
+function prefAllows(prefs, sym, key) {
+  const p = prefs && prefs[sym];
+  if (!p || !p.off || !p.off.length) return true;
+  const c = catOf(key);
+  return !c || !p.off.includes(c);
+}
 let lastPushErr = null;
 async function broadcast(title, bodyTxt, key) {
   const dead = [];
@@ -173,10 +184,33 @@ function watchUnion() {
 /* route an alert by INTEREST: the legacy shared list broadcasts as before;
    claimed devices are pushed only for symbols on their own watchlist */
 async function sendAlert(sym, title, bodyTxt, key) {
-  if (watch.includes(sym)) await broadcast(title, bodyTxt, key);
+  if (watch.includes(sym) && prefAllows(watchPrefs, sym, key)) await broadcast(title, bodyTxt, key);
   let changed = false;
   for (const d of Object.values(devices)) {
-    if (!d.sub || !(d.symbols || []).includes(sym)) continue;
+    if (!d.sub || !(d.symbols || []).includes(sym) || !prefAllows(d.prefs, sym, key)) continue;
+    const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
+    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
+    if (code === 404 || code === 410) { d.sub = null; changed = true; }
+  }
+  if (changed) saveDevices();
+}
+/* PRICE-CROSS LEVELS (up to 15/ticker): pushed only to whoever set the level */
+function levelsFor(sym) {
+  const set = new Set();
+  const add = (p) => {
+    const e = p && p[sym];
+    if (e && Array.isArray(e.lv)) for (const L of e.lv.slice(0, 15)) if (typeof L === "number" && isFinite(L) && L > 0) set.add(L);
+  };
+  add(watchPrefs);
+  for (const d of Object.values(devices)) add(d.prefs);
+  return [...set];
+}
+async function sendLevelAlert(sym, L, title, bodyTxt, key) {
+  const hasL = (p) => { const e = p && p[sym]; return !!(e && Array.isArray(e.lv) && e.lv.includes(L)); };
+  if (watch.includes(sym) && hasL(watchPrefs)) await broadcast(title, bodyTxt, key);
+  let changed = false;
+  for (const d of Object.values(devices)) {
+    if (!d.sub || !hasL(d.prefs)) continue;
     const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
     if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) { d.sub = null; changed = true; }
@@ -376,6 +410,18 @@ async function monitorTick() {
           monState.fired.add(trig.key);
           console.log("PUSH:", trig.title);
           await sendAlert(s, trig.title, trig.body, trig.key);
+        }
+        /* user-set price-cross levels on this symbol */
+        if (arr.length >= 2) {
+          const c1 = arr[arr.length - 2].c, c2 = arr[arr.length - 1].c;
+          for (const L of levelsFor(s)) {
+            if ((c1 - L) * (c2 - L) >= 0) continue;
+            const lkey = `${s}-xlvl-${L}-${c2 > L ? "up" : "dn"}`;
+            if (monState.fired.has(lkey)) continue;
+            monState.fired.add(lkey);
+            console.log("PUSH:", `🎯 ${s} crossed $${fp(L)}`);
+            await sendLevelAlert(s, L, `🎯 ${s} crossed $${fp(L)}`, `${c2 > L ? "Up" : "Down"} through your level — now $${fp(c2)}`, lkey);
+          }
         }
       }
     }
@@ -577,12 +623,14 @@ const server = http.createServer(async (req, res) => {
       if (SERVER_KEYS && b.device) {
         if (!deviceOk(b.device)) throw new Error("device not authorized");
         devices[b.device].symbols = syms; /* this device's own watchlist */
+        if (b.prefs && typeof b.prefs === "object") devices[b.device].prefs = b.prefs;
         saveDevices();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, watching: syms.length }));
         return;
       }
       watch = syms;
+      if (b.prefs && typeof b.prefs === "object") watchPrefs = b.prefs;
       saveSubs();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));

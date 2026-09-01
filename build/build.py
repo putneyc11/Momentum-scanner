@@ -89,6 +89,16 @@ REPS = [
       } catch {}''',
      '''      let id = null;
       try { id = localStorage.getItem("device-id"); } catch {}'''),
+    ('''      try {
+        const pr = await window.storage.get("alert-prefs");
+        if (pr && pr.value) alertPrefsRef.current = JSON.parse(pr.value) || {};
+      } catch {}''',
+     '''      try {
+        const praw = localStorage.getItem("alert-prefs");
+        if (praw) alertPrefsRef.current = JSON.parse(praw) || {};
+      } catch {}'''),
+    ('try { window.storage.set("alert-prefs", JSON.stringify(alertPrefsRef.current)); } catch (e) {}',
+     'try { localStorage.setItem("alert-prefs", JSON.stringify(alertPrefsRef.current)); } catch (e) {}'),
     ('try { window.storage.set("device-id", id); } catch (e) {}',
      'try { localStorage.setItem("device-id", id); } catch (e) {}'),
     ('try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}',

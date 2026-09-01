@@ -523,7 +523,24 @@ function BellIcon({ muted }) {
   );
 }
 
+/* ---------------- outline newspaper icon ---------------- */
+function NewsIcon({ size }) {
+  return (
+    <svg width={size || 13} height={size || 13} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: "block", flexShrink: 0 }}>
+      <path d="M4 22h14a2 2 0 0 0 2-2V6l-4-4H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2z" />
+      <path d="M16 2v4h4" /><path d="M9 13h6" /><path d="M9 17h6" /><path d="M9 9h2" />
+    </svg>
+  );
+}
+
 /* ---------------- watchlist row ---------------- */
+/* per-ticker alert categories a user can switch off individually */
+const ALERT_CATS = [
+  ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
+  ["mom3", "3 green"], ["vol", "Volume surge"], ["halt", "Halts"], ["rot", "Rotation"],
+];
+
 /* catalyst headlines that smell like dilution — flagged in red on the row */
 const DILUTE_RE = /offering|registered direct|private placement|dilut|at-the-market|warrant inducement|reverse split|\bS-1\b|\bS-3\b|prices? public/i;
 
@@ -551,8 +568,9 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
         {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10, marginLeft: 4 }}>⚠</span>}
         {news && (
           /* catalyst attached — full headline lives in the Advanced view */
-          <span title={news.headline} style={{ fontSize: 9, marginLeft: 4, color: news.dilution ? C.down : C.dim, fontWeight: 700 }}>
-            {news.dilution ? "⚠dil" : "📰"}
+          <span title={news.headline} style={{ marginLeft: 4, color: news.dilution ? C.down : C.dim, display: "inline-flex", alignItems: "center", gap: 2, verticalAlign: "-2px" }}>
+            <NewsIcon />
+            {news.dilution && <span style={{ fontSize: 8, fontWeight: 800 }}>dil</span>}
           </span>
         )}
       </span>
@@ -827,7 +845,7 @@ const WINS = [
 const WIN_TF = { "1D": null, "5D": "15Min", "1M": "1Hour", "3M": "1Hour", "6M": "1Day", "1Y": "1Day", "5Y": "1Day" };
 const MAX_BARS = 2000;
 
-function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
+function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, onSetLevels, onClose, onAlert }) {
   const width = useWidth();
   const mobile = width < 720;
   const [tf, setTf] = useState("1Min");
@@ -856,6 +874,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
   barsRef.current = bars;
 
   const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
+  const [lvIn, setLvIn] = useState(""); // price-level alert input
 
   const tfObj = TFS.find((t) => t.key === tf);
   const daily = tf === "1Day";
@@ -1153,10 +1172,50 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
   };
   const onTouchEnd = (e) => {
     if (holdTimerRef.current) { clearTimeout(holdTimerRef.current); holdTimerRef.current = null; }
-    if (touchRef.current && touchRef.current.mode === "scrub") setCrossAbs(null); /* lift = back to live */
     if (e.touches.length < 2) pinchRef.current = null;
-    if (e.touches.length === 0) touchRef.current = null;
+    if (e.touches.length === 0) {
+      touchRef.current = null;
+      setCrossAbs(null); /* fingers up = the minute-detail readout goes away */
+    }
   };
+
+  /* separate after-hours % (vs today's 4:00 PM close) once the AH session is live */
+  const ahPct = useMemo(() => {
+    if (tf !== "1Min" || bars.length < 2) return null;
+    const nowMin = etMinutes(Date.now());
+    if (nowMin < 960 || nowMin >= 1200) return null;
+    let regClose = null;
+    for (const b of bars) if (etMinutes(b.t) < 960) regClose = b.c;
+    const lastB = bars[bars.length - 1];
+    if (regClose == null || etMinutes(lastB.t) < 960) return null;
+    return ((lastB.c - regClose) / regClose) * 100;
+  }, [bars, tf]);
+
+  /* level % tags refresh from a 15s price snapshot (no per-tick jitter) */
+  const [statPx, setStatPx] = useState(null);
+  useEffect(() => {
+    const grab = () => { const b = barsRef.current; if (b.length) setStatPx(b[b.length - 1].c); };
+    grab();
+    const id = setInterval(grab, 15000);
+    return () => clearInterval(id);
+  }, [symbol, tf]);
+
+  /* the browser must never treat a chart drag as a text/image selection —
+     non-passive preventDefault kills the iOS long-press copy callout and
+     the gesture arbitration lag */
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const prevent = (e) => e.preventDefault();
+    cv.addEventListener("touchstart", prevent, { passive: false });
+    cv.addEventListener("touchmove", prevent, { passive: false });
+    cv.addEventListener("contextmenu", prevent);
+    return () => {
+      cv.removeEventListener("touchstart", prevent);
+      cv.removeEventListener("touchmove", prevent);
+      cv.removeEventListener("contextmenu", prevent);
+    };
+  }, []);
 
   const last = bars[len - 1];
   const price = last ? last.c : null;
@@ -1194,12 +1253,72 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
       {children}
     </button>
   );
-  const StatCell = ({ label, value, color }) => (
-    <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 12, color: color || C.text, whiteSpace: "nowrap" }}>{value}</div>
-    </div>
-  );
+  const StatCell = ({ label, value, color, pctOf }) => {
+    /* pctOf: a price level — show its live distance from price (15s snapshot) */
+    const d = pctOf != null && statPx ? ((pctOf - statPx) / statPx) * 100 : null;
+    return (
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>{label}</div>
+        <div style={{ fontFamily: MONO, fontSize: 12, color: color || C.text, whiteSpace: "nowrap" }}>
+          {value}
+          {d != null && (
+            <span style={{ fontSize: 9, fontWeight: 700, marginLeft: 4, color: d >= 0 ? C.up : C.down }}>
+              {(d >= 0 ? "+" : "") + d.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  /* one-tap chart snapshot: the chart canvas + the minute's price and every
+     level, composed into a single PNG — built for "screenshot → ask my AI" */
+  const buildShot = () => new Promise((resolve) => {
+    const src = canvasRef.current;
+    if (!src || !src.width) { resolve(null); return; }
+    const scale = src.width / Math.max(1, src.clientWidth);
+    const lineH = Math.round(17 * scale), pad = Math.round(12 * scale);
+    const rows = [
+      `${symbol}  $${fp(dispPrice)}  ${fpct(dispPct)}${ahPct != null ? "  AH " + fpct(ahPct) : ""}  ${inspBar ? (daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET") : "live"}`,
+      calc ? `VWAP ${fp(calc.vwapNow)}   EMA8 ${fp(calc.e8Now)}   EMA21 ${fp(calc.e21Now)}   EMA50 ${fp(calc.e50Now)}` : "",
+      calc ? `DayH ${fp(calc.dayHi)}   DayL ${fp(calc.dayLo)}   Vol ${fv(calc.dayVol)}   Float ${flt ? fv(flt) : "—"}` : "",
+      `PMH ${calc && calc.pmH != null ? fp(calc.pmH) : "—"}   PML ${calc && calc.pmL != null ? fp(calc.pmL) : "—"}   LULD↑ ${luld ? fp(luld.up) : "—"}   LULD↓ ${luld ? fp(luld.dn) : "—"}`,
+    ].filter(Boolean);
+    const out = document.createElement("canvas");
+    out.width = src.width;
+    out.height = src.height + rows.length * lineH + pad * 2;
+    const ctx = out.getContext("2d");
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(src, 0, 0);
+    ctx.fillStyle = C.text;
+    ctx.font = `${Math.round(12 * scale)}px ui-monospace, Menlo, monospace`;
+    rows.forEach((r, i) => ctx.fillText(r, pad, src.height + pad + (i + 0.8) * lineH));
+    out.toBlob(resolve, "image/png");
+  });
+  const saveShot = async () => {
+    try {
+      const blob = await buildShot();
+      if (!blob) return;
+      const file = new File([blob], `${symbol}-chart.png`, { type: "image/png" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === "AbortError") return; }
+      }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = file.name;
+      a.click();
+    } catch (e) {}
+  };
+  const copyShot = async () => {
+    try {
+      /* Safari demands the ClipboardItem inside the tap gesture — pass the promise */
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": buildShot() })]);
+      if (onAlert) onAlert("📋 Chart copied", "Snapshot is on your clipboard — paste it straight to your AI");
+    } catch (e) {
+      if (onAlert) onAlert("Copy blocked", "This browser refused image clipboard — use Save instead");
+    }
+  };
 
   const sidebar = (
     <>
@@ -1260,27 +1379,34 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
     <div
       onTouchStart={onEdgeStart} onTouchMove={onEdgeMove} onTouchEnd={onEdgeEnd}
       style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 50, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: `1px solid ${C.border}` }}>
-        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "5px 11px", cursor: "pointer", fontSize: 13 }}>←</button>
-        <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: 0.5 }}>{symbol}</span>
-        <span style={{ fontFamily: MONO, fontSize: 15, color: inspBar ? C.amber : C.text }}>{fp(dispPrice)}</span>
-        <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down }}>{fpct(dispPct)}</span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap", gap: "8px 16px", padding: 16, borderBottom: `1px solid ${C.border}` }}>
+        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, padding: "10px 18px", cursor: "pointer", fontSize: 22 }}>←</button>
+        <span style={{ fontSize: 32, fontWeight: 800, letterSpacing: 0.5 }}>{symbol}</span>
+        <span style={{ fontFamily: MONO, fontSize: 30, color: inspBar ? C.amber : C.text }}>{fp(dispPrice)}</span>
+        <span style={{ fontFamily: MONO, fontSize: 26, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down }}>{fpct(dispPct)}</span>
+        {ahPct != null && (
+          <span style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>AH {fpct(ahPct)}</span>
+        )}
         {inspBar && (
-          <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
+          <span style={{ fontFamily: MONO, fontSize: 16, color: C.dim }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
         )}
         {g && g.grade && (
-          <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 800, color: gradeColor(g.grade), border: `1px solid ${gradeColor(g.grade)}66`, borderRadius: 4, padding: "1px 5px" }}>{g.grade} {g.score}</span>
+          <span style={{ fontFamily: MONO, fontSize: 18, fontWeight: 800, color: gradeColor(g.grade), border: `1px solid ${gradeColor(g.grade)}66`, borderRadius: 6, padding: "3px 10px" }}>{g.grade} {g.score}</span>
         )}
-        <div style={{ flex: 1 }} />
-        <span style={{ fontFamily: MONO, fontSize: 8, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "2px 6px", whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: MONO, fontSize: 13, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "4px 12px", whiteSpace: "nowrap" }}>
           {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
         </span>
       </div>
-      <div className="noscrollbar" style={{ display: "flex", gap: 6, padding: "4px 8px", borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
+      <div className="noscrollbar" style={{ display: "flex", gap: 8, padding: 16, borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
         <Seg items={TFS} val={tf} set={setTf} />
         <Seg items={WINS} val={win} set={(k) => { setWin(k); const s = WIN_TF[k]; if (s) setTf(s); }} />
+        <button
+          onClick={() => setReplay((r) => (r ? null : { idx: Math.max(2, Math.floor(barsRef.current.length / 4)), playing: false }))}
+          style={{ background: replay ? C.amber + "22" : "transparent", border: `1px solid ${replay ? C.amber : C.border}`, color: replay ? C.amber : C.dim, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
+          {replay ? "✕ Replay" : "▶ Replay"}
+        </button>
       </div>
-      <div className="noscrollbar" style={{ display: "flex", gap: 5, padding: "5px 8px", borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
+      <div className="noscrollbar" style={{ display: "flex", gap: 6, padding: 16, borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
         <Toggle k="vwap" label="VWAP" color={C.vwap} />
         <Toggle k="e8" label="EMA 8" color={C.ema8} />
         <Toggle k="e21" label="EMA 21" color={C.ema21} />
@@ -1290,15 +1416,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
         <CtrlBtn onClick={() => zoom(1.3, 0.5)} title="zoom out">−</CtrlBtn>
         <CtrlBtn onClick={() => zoom(0.75, 0.5)} title="zoom in">+</CtrlBtn>
         <button
-          onClick={fitAll}
+          onClick={fitAll} aria-label="fit all" title="fit all"
           onTouchEnd={(e) => { e.preventDefault(); fitAll(); }}
-          style={{ background: following ? "transparent" : C.amber + "22", border: `1px solid ${following ? C.border : C.amber}`, color: following ? C.dim : C.amber, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
-          ⟲ Fit all
-        </button>
-        <button
-          onClick={() => setReplay((r) => (r ? null : { idx: Math.max(2, Math.floor(barsRef.current.length / 4)), playing: false }))}
-          style={{ background: replay ? C.amber + "22" : "transparent", border: `1px solid ${replay ? C.amber : C.border}`, color: replay ? C.amber : C.dim, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
-          {replay ? "✕ Replay" : "▶ Replay"}
+          style={{ background: following ? "transparent" : C.amber + "22", border: `1px solid ${following ? C.border : C.amber}`, color: following ? C.dim : C.amber, borderRadius: 6, width: 30, height: 30, fontFamily: MONO, fontSize: 14, cursor: "pointer", flexShrink: 0, display: "grid", placeItems: "center" }}>
+          ⟲
         </button>
         {err && <span style={{ color: C.down, fontSize: 11, fontFamily: MONO }}>{err}</span>}
       </div>
@@ -1320,19 +1441,35 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
           </span>
         </div>
       )}
-      {news && (
-        /* the catalyst behind the move — why it's up, not just how much */
-        <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 10px", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.muted, minWidth: 0 }}>
-          {news.dilution && (
-            <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>DILUTION RISK</span>
-          )}
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📰 {news.headline}</span>
-          <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h ago</span>
-        </div>
-      )}
+      {/* catalyst bar — why it's moving, plus one-tap chart snapshots */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", padding: 16, borderBottom: `1px solid ${C.border}`, fontSize: 12, color: C.muted, minWidth: 0 }}>
+        <span style={{ color: news && news.dilution ? C.down : C.dim, flexShrink: 0 }}><NewsIcon size={16} /></span>
+        {news && news.dilution && (
+          <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "2px 6px", flexShrink: 0 }}>DILUTION RISK</span>
+        )}
+        {news ? (
+          <a href={news.url || undefined} target="_blank" rel="noopener noreferrer"
+             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.text, textDecoration: news.url ? "underline" : "none", textUnderlineOffset: 3, minWidth: 0, flex: 1 }}>
+            {news.headline}
+          </a>
+        ) : (
+          <span style={{ color: C.dim, flex: 1 }}>No recent headline for {symbol}.</span>
+        )}
+        {news && (
+          <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h</span>
+        )}
+        <button onClick={copyShot} aria-label="copy chart snapshot" title="copy a snapshot of the chart + levels to the clipboard"
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", flexShrink: 0 }}>
+          ⧉ Copy
+        </button>
+        <button onClick={saveShot} aria-label="save chart snapshot" title="save a snapshot of the chart + levels as a photo"
+          style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+          ⬇ Save
+        </button>
+      </div>
       <div style={{ flex: 1, display: "flex", flexDirection: mobile ? "column" : "row", minHeight: 0, overflowY: mobile ? "auto" : "hidden" }}>
         <div style={{ flex: mobile ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, overflowY: mobile ? "visible" : "auto" }}>
-          <div style={{ position: "relative", flex: mobile ? "0 0 auto" : "0 0 52%", height: mobile ? "34vh" : "auto", minHeight: mobile ? 220 : 300 }}>
+          <div className="chartbox" style={{ position: "relative", flex: mobile ? "0 0 auto" : "0 0 52%", height: mobile ? "34vh" : "auto", minHeight: mobile ? 220 : 300, touchAction: "none" }}>
             {chartHalt && (
               <div style={{ position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 5, background: "#2A0F14", border: `1px solid ${C.down}`, color: C.down, fontFamily: MONO, fontSize: 11, borderRadius: 6, padding: "5px 10px", whiteSpace: "nowrap" }}>
                 ⛔ tape stalled — possible halt
@@ -1351,21 +1488,71 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, onClose, onAlert }) {
               {mobile ? "hold & drag: inspect · swipe: pan · pinch: zoom" : "drag: pan · scroll: zoom · hover: inspect"}
             </div>
           </div>
-          {/* stats strip */}
-          <div style={{ borderTop: `1px solid ${C.border}`, background: C.panel, padding: "9px 12px", display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "8px 10px" }}>
-            <StatCell label="VWAP" value={calc ? fp(calc.vwapNow) : "—"} color={C.vwap} />
-            <StatCell label="Day vol" value={calc ? fv(calc.dayVol) : "—"} />
-            <StatCell label="Day high" value={calc ? fp(calc.dayHi) : "—"} color={C.up} />
-            <StatCell label="Day low" value={calc ? fp(calc.dayLo) : "—"} color={C.down} />
-            <StatCell label="Float" value={flt ? fv(flt) : "—"} />
-            <StatCell label={luld ? `LULD ↑ est ${luld.band}%` : "LULD ↑ est"} value={luld ? fp(luld.up) : "—"} color={C.amber} />
-            <StatCell label={luld ? `LULD ↓ est ${luld.band}%` : "LULD ↓ est"} value={luld ? fp(luld.dn) : "—"} color={C.down} />
-            <StatCell label="PM high" value={calc && calc.pmH != null ? fp(calc.pmH) : "—"} color={C.amber} />
-            <StatCell label="PM low" value={calc && calc.pmL != null ? fp(calc.pmL) : "—"} />
-            <StatCell label="EMA 8" value={calc ? fp(calc.e8Now) : "—"} color={C.ema8} />
-            <StatCell label="EMA 21" value={calc ? fp(calc.e21Now) : "—"} color={C.ema21} />
-            <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} />
+          {/* today's numbers — each level tagged with its live distance from price */}
+          <div style={{ borderTop: `1px solid ${C.border}`, background: C.panel }}>
+            <div style={{ padding: "10px 16px 0", fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Today's numbers</div>
+            <div style={{ padding: 16, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px 10px" }}>
+              <StatCell label="Day high" value={calc ? fp(calc.dayHi) : "—"} color={C.up} pctOf={calc ? calc.dayHi : null} />
+              <StatCell label="Day low" value={calc ? fp(calc.dayLo) : "—"} color={C.down} pctOf={calc ? calc.dayLo : null} />
+              <StatCell label="Day vol" value={calc ? fv(calc.dayVol) : "—"} />
+              <StatCell label="Float" value={flt ? fv(flt) : "—"} />
+              <StatCell label="PM high" value={calc && calc.pmH != null ? fp(calc.pmH) : "—"} color={C.amber} pctOf={calc ? calc.pmH : null} />
+              <StatCell label="PM low" value={calc && calc.pmL != null ? fp(calc.pmL) : "—"} pctOf={calc ? calc.pmL : null} />
+              <StatCell label={luld ? `LULD ↑ est ${luld.band}%` : "LULD ↑ est"} value={luld ? fp(luld.up) : "—"} color={C.amber} pctOf={luld ? luld.up : null} />
+              <StatCell label={luld ? `LULD ↓ est ${luld.band}%` : "LULD ↓ est"} value={luld ? fp(luld.dn) : "—"} color={C.down} pctOf={luld ? luld.dn : null} />
+              <StatCell label="VWAP" value={calc ? fp(calc.vwapNow) : "—"} color={C.vwap} pctOf={calc ? calc.vwapNow : null} />
+              <StatCell label="EMA 8" value={calc ? fp(calc.e8Now) : "—"} color={C.ema8} pctOf={calc ? calc.e8Now : null} />
+              <StatCell label="EMA 21" value={calc ? fp(calc.e21Now) : "—"} color={C.ema21} pctOf={calc ? calc.e21Now : null} />
+              <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} pctOf={calc ? calc.e50Now : null} />
+            </div>
           </div>
+          {/* per-ticker alert customization + price-cross levels */}
+          {onTogglePref && (
+            <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>
+                🔔 Alerts for {symbol}
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 16 }}>
+                {ALERT_CATS.map(([cat, label]) => {
+                  const on = !(prefs && prefs.off && prefs.off.includes(cat));
+                  return (
+                    <button key={cat} onClick={() => onTogglePref(symbol, cat, !on)}
+                      style={{ background: on ? C.up + "1A" : "transparent", border: `1px solid ${on ? C.up : C.border}`, color: on ? C.up : C.dim, borderRadius: 6, padding: "6px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>
+                      {on ? "✓ " : ""}{label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ padding: "0 16px 6px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
+                Price-cross levels · alerts when price crosses · up to 15
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 16px 16px", alignItems: "center" }}>
+                {((prefs && prefs.lv) || []).map((L) => (
+                  <span key={L} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.amber + "14", border: `1px solid ${C.amber}55`, borderRadius: 6, padding: "5px 9px", fontFamily: MONO, fontSize: 11, color: C.amber }}>
+                    ${fp(L)}
+                    <span onClick={() => onSetLevels(symbol, ((prefs && prefs.lv) || []).filter((x) => x !== L))}
+                      style={{ cursor: "pointer", color: C.muted, fontWeight: 700 }} aria-label={`remove level ${L}`}>×</span>
+                  </span>
+                ))}
+                {((prefs && prefs.lv) || []).length < 15 && (
+                  <>
+                    <input value={lvIn} onChange={(e) => setLvIn(e.target.value)} inputMode="decimal" placeholder="price"
+                      style={{ width: 74, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "6px 8px", fontFamily: MONO, fontSize: 11 }} />
+                    <button
+                      onClick={() => {
+                        const v = Number(lvIn);
+                        if (!isFinite(v) || v <= 0) return;
+                        onSetLevels(symbol, [...new Set([...((prefs && prefs.lv) || []), +v.toFixed(4)])].sort((a, b) => a - b));
+                        setLvIn("");
+                      }}
+                      style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 6, padding: "6px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                      + Add level
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
           {/* confluence tracker */}
           <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -1535,6 +1722,39 @@ export default function App() {
     try { window.storage.set("onboard-seen", "1"); } catch (e) {}
   }, []);
   const openHelp = useCallback(() => { setOnboardMode("help"); setOnboardOpen(true); }, []);
+
+  /* per-ticker notification prefs: switched-off categories + up to 15
+     price-cross levels per symbol. Synced to the push monitor with the
+     watchlist (~15s), persisted on this device. */
+  const alertPrefsRef = useRef({}); // sym -> { off: [cats], lv: [levels] }
+  const [alertPrefsVer, setAlertPrefsVer] = useState(0);
+  useEffect(() => {
+    (async () => {
+      try {
+        const pr = await window.storage.get("alert-prefs");
+        if (pr && pr.value) alertPrefsRef.current = JSON.parse(pr.value) || {};
+      } catch {}
+      setAlertPrefsVer((v) => v + 1);
+    })();
+  }, []);
+  const savePrefs = useCallback(() => {
+    try { window.storage.set("alert-prefs", JSON.stringify(alertPrefsRef.current)); } catch (e) {}
+    setAlertPrefsVer((v) => v + 1);
+  }, []);
+  const setPref = useCallback((sym, cat, on) => {
+    const p = alertPrefsRef.current[sym] || (alertPrefsRef.current[sym] = { off: [], lv: [] });
+    p.off = on ? (p.off || []).filter((c) => c !== cat) : [...new Set([...(p.off || []), cat])];
+    savePrefs();
+  }, [savePrefs]);
+  const setLevels = useCallback((sym, lv) => {
+    const p = alertPrefsRef.current[sym] || (alertPrefsRef.current[sym] = { off: [], lv: [] });
+    p.lv = lv.filter((x) => typeof x === "number" && isFinite(x) && x > 0).slice(0, 15);
+    savePrefs();
+  }, [savePrefs]);
+  const prefOff = useCallback((sym, cat) => {
+    const p = alertPrefsRef.current[sym];
+    return !!(p && p.off && p.off.includes(cat));
+  }, []);
   const [ahMoves, setAhMoves] = useState([]);
   const [ahInfo, setAhInfo] = useState({}); /* ungated AH stats for main-row chips */
   const [mutedSyms, setMutedSyms] = useState([]); /* mirrors mutedRef for the row bells */
@@ -1580,7 +1800,7 @@ export default function App() {
     try {
       fetch("/push/watchlist", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined }),
+        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined, prefs: alertPrefsRef.current }),
       }).catch(() => {});
     } catch (e) {}
   }, []);
@@ -2047,11 +2267,11 @@ export default function App() {
             if (volQ) st.volBarT = last.t;
           } else {
             if (fresh) {
-              if (st.vwapSide === false && above)
+              if (st.vwapSide === false && above && !prefOff(s, "vwap"))
                 alertOnce(`${s}-vwapx`, `🚨 ${s} reclaimed VWAP`, `Crossed above $${fp(vwL)} · now $${fp(p)}`);
-              if (st.emaSide === false && emAbove)
+              if (st.emaSide === false && emAbove && !prefOff(s, "ema"))
                 alertOnce(`${s}-emax`, `🚨 ${s} 8/21 EMA bull cross`, `EMA 8 crossed above EMA 21 · $${fp(p)}`);
-              if (!st.pmhBroken && pmhNow)
+              if (!st.pmhBroken && pmhNow && !prefOff(s, "pmh"))
                 alertOnce(`${s}-pmh`, `🚨 ${s} broke premarket high`, `Through PMH $${fp(pmH)} · now $${fp(p)}`);
               /* 3+ consecutive green 1-min candles: fires when a streak
                  REACHES 3 (bar before the run was red/flat), once per streak,
@@ -2059,12 +2279,12 @@ export default function App() {
               const last3 = arr.slice(-3);
               const before3 = arr.length >= 4 ? arr[arr.length - 4] : null;
               const streak3 = last3.length === 3 && last3.every((b) => b.c > b.o) && (!before3 || before3.c <= before3.o);
-              if (streak3 && (!st.lastMom3 || nowMs - st.lastMom3 > 15 * 60000)) {
+              if (streak3 && !prefOff(s, "mom3") && (!st.lastMom3 || nowMs - st.lastMom3 > 15 * 60000)) {
                 st.lastMom3 = nowMs;
                 const runPct = ((last.c - last3[0].o) / last3[0].o) * 100;
                 alertOnce(`${s}-mom3-${last.t}`, `📈 ${s} 3 green candles in a row`, `$${fp(last3[0].o)} → $${fp(last.c)} (+${runPct.toFixed(1)}%) on 1-min`);
               }
-              if (volQ && last.t !== st.volBarT && (!st.lastVolAlert || nowMs - st.lastVolAlert > 30 * 60000)) {
+              if (volQ && !prefOff(s, "vol") && last.t !== st.volBarT && (!st.lastVolAlert || nowMs - st.lastVolAlert > 30 * 60000)) {
                 st.lastVolAlert = nowMs;
                 alertOnce(`${s}-vol-${last.t}`, `🔥 ${s} volume spike ${avg10 ? (last.v / avg10).toFixed(1) : "?"}×`, `${fv(last.v)}/min ${last.c >= last.o ? "↑" : "↓"}${barMove.toFixed(1)}%${openQ ? " · ≥ opening drive" : ""} @ $${fp(last.c)}`);
               }
@@ -2077,10 +2297,10 @@ export default function App() {
       if (alertsOnRef.current) {
         const hr2 = Math.floor(nowMs / 3600000);
         for (const s of newHalt)
-          if (!haltRef.current.has(s) && listSet.has(s) && !mutedRef.current.has(s))
+          if (!haltRef.current.has(s) && listSet.has(s) && !mutedRef.current.has(s) && !prefOff(s, "halt"))
             alertOnce(`${s}-halt-${hr2}`, `⛔ ${s} possible halt`, "Heavy tape went silent — no prints for 2+ min (LULD?)");
         for (const s of haltRef.current)
-          if (!newHalt.includes(s) && listSet.has(s) && !mutedRef.current.has(s))
+          if (!newHalt.includes(s) && listSet.has(s) && !mutedRef.current.has(s) && !prefOff(s, "halt"))
             alertOnce(`${s}-resume-${hr2}`, `▶ ${s} trading again`, "Prints resumed after the pause");
       }
       /* halt timers: stamp when a flag first raises, clear on resume */
@@ -2113,7 +2333,7 @@ export default function App() {
       setAhMoves(ahTop);
       setAhInfo(ahOn ? ahAll : {});
     } catch (e) {}
-  }, [keys, feed, alertOnce, getFloat]);
+  }, [keys, feed, alertOnce, getFloat, prefOff]);
   useEffect(() => { ignScanRef.current = ignScan; }, [ignScan]);
   useEffect(() => {
     if (!running || paused) return;
@@ -2212,7 +2432,7 @@ export default function App() {
         g.score = sc.score; g.grade = sc.grade; g.rotation = sc.rotation;
         /* float-rotation milestones: alert once per level per day (1x, 2x, 3x…) */
         const rotM = Math.floor(g.rotation || 0);
-        if (rotM >= 1 && rotM <= 10 && alertsOnRef.current && !mutedRef.current.has(g.symbol))
+        if (rotM >= 1 && rotM <= 10 && alertsOnRef.current && !mutedRef.current.has(g.symbol) && !prefOff(g.symbol, "rot"))
           alertOnce(`${g.symbol}-rot${rotM}`, `🔄 ${g.symbol} float rotation ${rotM}×`, `${fv(g.dayVol)} traded vs ${fv(flVal)} float @ $${fp(g.price)}`);
       }
       pool.sort((a, b) => b.score - a.score || b.pct - a.pct);
@@ -2237,7 +2457,7 @@ export default function App() {
     } finally {
       busy.current = false;
     }
-  }, [keys, maxPrice, feed, minDayVol, getFloat, syncWatch, alertOnce]);
+  }, [keys, maxPrice, feed, minDayVol, getFloat, syncWatch, alertOnce, prefOff]);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
   /* CATALYST TAGGING: Alpaca's news feed, one batched call a minute for the
@@ -2257,7 +2477,7 @@ export default function App() {
           const dil = DILUTE_RE.test(n.headline || "");
           for (const s of n.symbols || []) {
             if (!syms.includes(s)) continue;
-            if (!map[s] || at > map[s].at) map[s] = { headline: n.headline, at, dilution: dil || (map[s] ? map[s].dilution : false) };
+            if (!map[s] || at > map[s].at) map[s] = { headline: n.headline, at, url: n.url || null, dilution: dil || (map[s] ? map[s].dilution : false) };
             else if (dil) map[s] = { ...map[s], dilution: true };
           }
         }
@@ -2281,6 +2501,17 @@ export default function App() {
   /* LIVE prices: daily bars only re-aggregate ~once a minute, so the rows
      poll the real-time latest-trade endpoint instead — the main watchlist AND
      the After Hours table together in ONE batched call, every 3 seconds */
+  /* custom price-cross alerts: up to 15 levels per ticker, once per level
+     per direction per day, checked on the same 3s live tick */
+  const checkLevels = useCallback((sym, prev, now) => {
+    if (prev == null || now == null || prev === now) return;
+    const p = alertPrefsRef.current[sym];
+    if (!p || !p.lv || !p.lv.length || !alertsOnRef.current || mutedRef.current.has(sym)) return;
+    for (const L of p.lv) {
+      if ((prev - L) * (now - L) < 0)
+        alertOnce(`${sym}-xlvl-${L}-${now > L ? "up" : "dn"}`, `🎯 ${sym} crossed $${fp(L)}`, `${now > L ? "Up" : "Down"} through your level — now $${fp(now)}`);
+    }
+  }, [alertOnce]);
   const priceTick = useCallback(async () => {
     const syms = gainersRef.current.map((g) => g.symbol);
     const all = Array.from(new Set([...syms, ...ahRef.current]));
@@ -2292,6 +2523,7 @@ export default function App() {
         const next = prev.map((g) => {
           const t = tr[g.symbol];
           if (!t || !t.p) return g;
+          checkLevels(g.symbol, g.price, t.p);
           const pct = g.prevClose ? ((t.p - g.prevClose) / g.prevClose) * 100 : g.pct;
           return { ...g, price: t.p, pct };
         });
@@ -2302,12 +2534,13 @@ export default function App() {
       setAhMoves((prev) => prev.map((r) => {
         const t = tr[r.symbol];
         if (!t || !t.p) return r;
+        checkLevels(r.symbol, r.price, t.p);
         const pct = r.close ? ((t.p - r.close) / r.close) * 100 : r.pct;
         return { ...r, price: t.p, pct };
       }));
       setUpdated(new Date());
     } catch (e) {}
-  }, [keys, feed]);
+  }, [keys, feed, checkLevels]);
   useEffect(() => {
     if (!running || paused) return;
     priceTick();
@@ -2344,7 +2577,7 @@ export default function App() {
   const pmNow = inPremarket(); /* re-evaluated on every render (3s price ticks) */
   const inputStyle = { width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 10px", fontFamily: MONO, fontSize: 14 };
   const labStyle = { fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 };
-  const globalCss = `.noscrollbar::-webkit-scrollbar{display:none}.noscrollbar{scrollbar-width:none}`;
+  const globalCss = `.noscrollbar::-webkit-scrollbar{display:none}.noscrollbar{scrollbar-width:none}canvas{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}.chartbox,.chartbox *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}`;
 
   if (!running) {
     return (
@@ -2599,6 +2832,9 @@ export default function App() {
           g={sel}
           pm={pmMap[sel.symbol]}
           news={newsMap[sel.symbol]}
+          prefs={{ ...(alertPrefsRef.current[sel.symbol] || { off: [], lv: [] }), v: alertPrefsVer }}
+          onTogglePref={setPref}
+          onSetLevels={setLevels}
           onClose={() => setSelected(null)}
           onAlert={chartAlert}
         />
