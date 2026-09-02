@@ -4,9 +4,11 @@
                    invite gate, per-device watchlists, proxy injection,
                    legacy passthrough). Run with server.js in the same
                    directory: `cp ../deploy/server.js . && node test-serverkeys.js`
-- test-onboard.js — Playwright UI: first-run walkthrough, About page,
-                   relocated disclosures, and the server-keys connect
-                   screen (access code, no key fields).
+- test-onboard.js — Playwright UI: first-run walkthrough → account sign-up
+                   (Apple / Google / email, simulated on-device) → Free vs
+                   Pro plan picker → connect screen; About page, relocated
+                   disclosures, and the server-keys connect screen (access
+                   code, no key fields).
 
 - test-dup.js    — server unit: every duplicate-notification scenario (subscription
                    replacement, unified volume alert, bar consumption, cooldowns,
@@ -19,9 +21,13 @@
                    the split-ADJUSTED prior close, thin tape is volume-gated,
                    reverse-split phantoms are dropped, and a row tap opens the
                    Advanced view directly.
-- test26.js      — Playwright UI: row tap opens the Advanced view directly (the
-                   tap-to-preview card was removed), back navigation. Clock pinned
-                   to 13:00 ET so the RTH discovery path runs.
+- test26.js      — Playwright UI: row tap opens the Advanced view directly, the
+                   four top bars fit a 390px phone with left/right groups on
+                   their edges, the header bell opens the per-ticker alerts
+                   sheet (categories + price levels), timeframe buttons are
+                   real tap targets that select on tap, Copy reports via a
+                   bottom toast, icon-only replay/fit-all, back navigation.
+                   Clock pinned to 13:00 ET so the RTH discovery path runs.
 - test28.js      — Playwright UI: alert coverage beyond the top-15, mom3 in-app,
                    alert-center modal, swipe-to-clear, the After Hours table
                    (full-market top-10, illiquid filter, true AH volume, a

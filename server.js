@@ -550,6 +550,14 @@ const server = http.createServer(async (req, res) => {
       }
       if (!devices[id] && Object.keys(devices).length >= MAX_DEVICES) throw new Error("device limit reached");
       devices[id] = devices[id] || { symbols: [], sub: null, t: Date.now() };
+      if (b.account && typeof b.account === "object") {
+        /* preview accounts: remembered per device so the operator can see who is on which plan */
+        devices[id].acct = {
+          email: String(b.account.email || "").slice(0, 120),
+          provider: String(b.account.provider || "").slice(0, 16),
+          plan: b.account.plan === "pro" ? "pro" : "free",
+        };
+      }
       saveDevices();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));

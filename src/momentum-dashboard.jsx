@@ -512,13 +512,31 @@ function Spark({ bars, up, h, fill }) {
 }
 
 /* ---------------- outline bell (stroke-only, inherits the row's gray) ---------------- */
-function BellIcon({ muted }) {
+function BellIcon({ muted, size }) {
   return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    <svg width={size || 15} height={size || 15} viewBox="0 0 24 24" fill="none" stroke="currentColor"
          strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: "block" }}>
       <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
       <path d="M13.73 21a2 2 0 0 1-3.46 0" />
       {muted && <line x1="2" y1="2" x2="22" y2="22" />}
+    </svg>
+  );
+}
+
+/* ---------------- outline copy / save icons ---------------- */
+function CopyIcon({ size }) {
+  return (
+    <svg width={size || 13} height={size || 13} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: "block", flexShrink: 0 }} aria-hidden="true">
+      <rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+function SaveIcon({ size }) {
+  return (
+    <svg width={size || 13} height={size || 13} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: "block", flexShrink: 0 }} aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
     </svg>
   );
 }
@@ -558,17 +576,17 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
       <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: "2px 6px", minWidth: 40, textAlign: "center", flexShrink: 0 }}>
         {g.grade} {g.score}
       </span>
-      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick }}>
+      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
         {g.symbol}
         {halted && (
-          <span style={{ color: C.down, fontSize: 10, marginLeft: 4, fontFamily: MONO }}>
+          <span style={{ color: C.down, fontSize: 10, fontFamily: MONO }}>
             ⛔{haltedAt ? `${Math.max(1, Math.round((Date.now() - haltedAt) / 60000))}m` : ""}
           </span>
         )}
-        {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10, marginLeft: 4 }}>⚠</span>}
+        {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10 }}>⚠</span>}
         {news && (
           /* catalyst attached — full headline lives in the Advanced view */
-          <span title={news.headline} style={{ marginLeft: 4, color: news.dilution ? C.down : C.dim, display: "inline-flex", alignItems: "center", gap: 2, verticalAlign: "-2px" }}>
+          <span title={news.headline} style={{ color: news.dilution ? C.down : C.dim, display: "inline-flex", alignItems: "center", gap: 2 }}>
             <NewsIcon />
             {news.dilution && <span style={{ fontSize: 8, fontWeight: 800 }}>dil</span>}
           </span>
@@ -771,7 +789,7 @@ function OnboardSlides({ mode, onDone, onSkip }) {
         {last ? (
           <button onClick={onDone}
             style={{ background: C.amber, color: "#06090D", border: "none", borderRadius: 8, padding: "13px 22px", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
-            {mode === "help" ? "Done" : "Connect Alpaca →"}
+            {mode === "help" ? "Done" : "Create account →"}
           </button>
         ) : (
           <button onClick={() => go(1)}
@@ -780,6 +798,102 @@ function OnboardSlides({ mode, onDone, onSkip }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---------------- account + plan (first-run, after the walkthrough) ----------------
+   PREVIEW BUILD: sign-in and billing are simulated on this device — no
+   identity provider or payment processor is wired yet. The screens are the
+   real UX so the App Store flow can be judged before the backend lands. */
+const PLAN_ROWS = [
+  ["Watchlist", "Top 10 movers", "Full ranked list + After Hours table"],
+  ["Market data", "15-min delayed display", "Real-time alerts from the server monitor"],
+  ["Alerts", "In-app banner", "Lock-screen push · per-ticker rules · 15 price levels"],
+  ["Tape replay", "—", "Scrub any session bar by bar"],
+  ["Halt intel", "—", "Estimated LULD bands + halt timers"],
+  ["Catalysts", "—", "Headlines + dilution flags on every row"],
+];
+const PRO_PRICE = "$9.99/mo";
+const acctLabel = (a) => !a ? "" : a.provider === "apple" ? "Apple ID" : a.provider === "google" ? "Google account" : a.email;
+
+function AccountFlow({ onDone, onSkip }) {
+  const [step, setStep] = useState("signup"); // signup | email | plan
+  const [email, setEmail] = useState("");
+  const [acct, setAcct] = useState(null);
+  const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const signIn = (provider, em) => {
+    setAcct({ provider, email: em || "", plan: "free", createdAt: Date.now() });
+    setStep("plan");
+  };
+  const pick = (plan) => onDone({ ...acct, plan, trial: plan === "pro" });
+  const shell = { position: "fixed", inset: 0, zIndex: 100, background: C.bg, color: C.text, display: "flex", flexDirection: "column", paddingTop: "calc(14px + env(safe-area-inset-top))", paddingBottom: "calc(14px + env(safe-area-inset-bottom))", fontFamily: "system-ui, sans-serif", overflowY: "auto" };
+  const col = { display: "flex", flexDirection: "column", gap: 14, padding: "0 22px", maxWidth: 520, width: "100%", margin: "0 auto", boxSizing: "border-box" };
+  const big = (extra) => ({ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, width: "100%", boxSizing: "border-box", borderRadius: 10, padding: "14px 16px", fontSize: 15, fontWeight: 700, cursor: "pointer", ...extra });
+  const AppleMark = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c0-2.4 1.96-3.55 2.05-3.6-1.12-1.64-2.86-1.86-3.47-1.89-1.48-.15-2.89.87-3.64.87-.75 0-1.9-.85-3.13-.83-1.61.02-3.1.94-3.93 2.38-1.68 2.91-.43 7.22 1.2 9.58.8 1.16 1.75 2.46 3 2.41 1.2-.05 1.66-.78 3.11-.78 1.45 0 1.86.78 3.13.75 1.29-.02 2.11-1.18 2.9-2.34.91-1.34 1.29-2.64 1.31-2.71-.03-.01-2.52-.97-2.53-3.84zM14 5.4c.66-.8 1.11-1.92.99-3.03-.95.04-2.1.63-2.79 1.43-.61.71-1.15 1.84-1.01 2.93 1.06.08 2.15-.54 2.81-1.33z"/></svg>
+  );
+  const GoogleMark = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5c-.3 1.5-1.1 2.7-2.4 3.6v3h3.9c2.2-2.1 3.5-5.1 3.5-8.7z"/><path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-2.9l-3.9-3c-1.1.7-2.5 1.2-4.1 1.2-3.1 0-5.8-2.1-6.7-5H1.3v3.1C3.3 21.3 7.3 24 12 24z"/><path fill="#FBBC05" d="M5.3 14.3c-.2-.7-.4-1.5-.4-2.3s.1-1.6.4-2.3V6.6H1.3C.5 8.2 0 10 0 12s.5 3.8 1.3 5.4l4-3.1z"/><path fill="#EA4335" d="M12 4.7c1.8 0 3.3.6 4.6 1.8l3.4-3.4C18 1.2 15.2 0 12 0 7.3 0 3.3 2.7 1.3 6.6l4 3.1c.9-2.9 3.6-5 6.7-5z"/></svg>
+  );
+  return (
+    <div style={shell}>
+      <div style={{ display: "flex", alignItems: "center", padding: "0 18px 10px" }}>
+        <span style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.amber }}>MOMENTUM SCANNER</span>
+        <div style={{ flex: 1 }} />
+        {step !== "plan" && <button onClick={onSkip} style={{ background: "transparent", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: 8 }}>Not now</button>}
+      </div>
+      {step === "signup" && (
+        <div style={{ ...col, flex: 1, justifyContent: "center" }}>
+          <h1 style={{ fontSize: 27, lineHeight: 1.16, fontWeight: 800, margin: 0 }}>Create your account</h1>
+          <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: "0 0 8px" }}>Your watchlist, alert rules and plan follow you to every device you sign in on.</p>
+          <button onClick={() => signIn("apple")} style={big({ background: "#FFFFFF", color: "#000", border: "none" })}><AppleMark /> Continue with Apple</button>
+          <button onClick={() => signIn("google")} style={big({ background: "#FFFFFF", color: "#1F1F1F", border: "none" })}><GoogleMark /> Continue with Google</button>
+          <button onClick={() => setStep("email")} style={big({ background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>✉ Continue with email</button>
+          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginTop: 6 }}>
+            Preview build — sign-in is simulated on this device and nothing is sent anywhere. By continuing you agree this is market information, not investment advice.
+          </div>
+        </div>
+      )}
+      {step === "email" && (
+        <div style={{ ...col, flex: 1, justifyContent: "center" }}>
+          <h1 style={{ fontSize: 27, lineHeight: 1.16, fontWeight: 800, margin: 0 }}>What's your email?</h1>
+          <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: 0 }}>We'll use it to sign you in — no password to remember.</p>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" inputMode="email" autoCapitalize="none" autoComplete="email" placeholder="you@example.com"
+            onKeyDown={(e) => { if (e.key === "Enter" && emailOk) signIn("email", email.trim()); }}
+            style={{ width: "100%", boxSizing: "border-box", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, color: C.text, padding: "14px 14px", fontFamily: MONO, fontSize: 15 }} />
+          <button disabled={!emailOk} onClick={() => signIn("email", email.trim())}
+            style={big({ background: emailOk ? C.amber : C.panel2, color: emailOk ? "#06090D" : C.dim, border: "none", cursor: emailOk ? "pointer" : "default" })}>Continue</button>
+          <button onClick={() => setStep("signup")} style={{ background: "transparent", border: "none", color: C.dim, fontSize: 13, cursor: "pointer", padding: 8 }}>← Other ways to sign in</button>
+        </div>
+      )}
+      {step === "plan" && (
+        <div style={{ ...col, paddingBottom: 16 }}>
+          <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.up }}>✓ SIGNED IN · {acctLabel(acct).toUpperCase()}</div>
+          <h1 style={{ fontSize: 27, lineHeight: 1.16, fontWeight: 800, margin: 0 }}>Choose your plan</h1>
+          <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: 0 }}>Free shows you the market. Pro tells you the moment it moves.</p>
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.3fr", gap: 8, padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1.2, textTransform: "uppercase" }}>
+              <span style={{ color: C.dim }}>Feature</span>
+              <span style={{ color: C.muted }}>Free</span>
+              <span style={{ color: C.amber }}>Pro · {PRO_PRICE}</span>
+            </div>
+            {PLAN_ROWS.map(([f, a, b]) => (
+              <div key={f} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.3fr", gap: 8, padding: "10px 14px", borderBottom: `1px solid ${C.border}66`, fontSize: 12, lineHeight: 1.4 }}>
+                <span style={{ fontWeight: 700 }}>{f}</span>
+                <span style={{ color: a === "—" ? C.dim : C.muted }}>{a}</span>
+                <span style={{ color: C.text }}>{b}</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={() => pick("pro")} style={big({ background: C.amber, color: "#06090D", border: "none", flexDirection: "column", gap: 2 })}>
+            <span>Start Pro · {PRO_PRICE}</span>
+            <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>7-day free trial · cancel any time</span>
+          </button>
+          <button onClick={() => pick("free")} style={big({ background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>Continue with Free</button>
+          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5 }}>Preview build — no charge today; billing arrives with the App Store release. Real-time alert pricing is subject to the data plan we finalize with our market-data vendor.</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -845,6 +959,39 @@ const WINS = [
 const WIN_TF = { "1D": null, "5D": "15Min", "1M": "1Hour", "3M": "1Hour", "6M": "1Day", "1Y": "1Day", "5Y": "1Day" };
 const MAX_BARS = 2000;
 
+/* Chart chrome lives at MODULE scope on purpose. Defined inside the chart's
+   render these were new component types on every data tick, so React
+   remounted the buttons under the user's finger — a tap that began on the
+   old element never produced a click ("tap targets not usable"). */
+const IndToggle = ({ on, label, color, onClick }) => (
+  <button onClick={onClick}
+    style={{ background: on ? color + "22" : "transparent", border: `1px solid ${on ? color : C.border}`, color: on ? color : C.dim, borderRadius: 5, height: 30, padding: "0 7px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, touchAction: "manipulation" }}>
+    {label}
+  </button>
+);
+const Seg = ({ items, val, set }) => (
+  <div style={{ display: "flex", gap: 2, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 6, padding: 2 }}>
+    {items.map((it) => (
+      <button key={it.key} onClick={() => set(it.key)}
+        style={{ background: val === it.key ? C.amber : "transparent", color: val === it.key ? "#06090D" : C.muted, fontWeight: val === it.key ? 700 : 400, border: "none", borderRadius: 5, minWidth: 26, height: 34, padding: "0 5px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", touchAction: "manipulation" }}>
+        {it.label}
+      </button>
+    ))}
+  </div>
+);
+const CtrlBtn = ({ onClick, children, title }) => (
+  <button onClick={onClick} title={title}
+    style={{ background: C.panel2, border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, width: 30, height: 30, cursor: "pointer", fontFamily: MONO, fontSize: 13, display: "grid", placeItems: "center", touchAction: "manipulation" }}>
+    {children}
+  </button>
+);
+const StatCell = ({ label, value, color }) => (
+  <div style={{ minWidth: 0 }}>
+    <div style={{ fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>{label}</div>
+    <div style={{ fontFamily: MONO, fontSize: 12, color: color || C.text, whiteSpace: "nowrap" }}>{value}</div>
+  </div>
+);
+
 function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, onSetLevels, onClose, onAlert }) {
   const width = useWidth();
   const mobile = width < 720;
@@ -874,6 +1021,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
   barsRef.current = bars;
 
   const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
+  const [alertsOpen, setAlertsOpen] = useState(false); // per-ticker alert sheet (bell in the header)
   const [lvIn, setLvIn] = useState(""); // price-level alert input
 
   const tfObj = TFS.find((t) => t.key === tf);
@@ -1191,15 +1339,6 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     return ((lastB.c - regClose) / regClose) * 100;
   }, [bars, tf]);
 
-  /* level % tags refresh from a 15s price snapshot (no per-tick jitter) */
-  const [statPx, setStatPx] = useState(null);
-  useEffect(() => {
-    const grab = () => { const b = barsRef.current; if (b.length) setStatPx(b[b.length - 1].c); };
-    grab();
-    const id = setInterval(grab, 15000);
-    return () => clearInterval(id);
-  }, [symbol, tf]);
-
   /* the browser must never treat a chart drag as a text/image selection —
      non-passive preventDefault kills the iOS long-press copy callout and
      the gesture arbitration lag */
@@ -1227,55 +1366,21 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
        : bars[0] ? ((inspBar.c - bars[0].o) / bars[0].o) * 100 : null)
     : g ? g.pct : null;
   const following = view === null;
+  const hasCustom = !!(prefs && ((prefs.off && prefs.off.length) || (prefs.lv && prefs.lv.length)));
   const spr = quote ? quote.ap - quote.bp : null;
   const mid = quote ? (quote.ap + quote.bp) / 2 : null;
   const sprPct = spr != null && mid ? (spr / mid) * 100 : null;
 
-  const Toggle = ({ k, label, color }) => (
-    <button onClick={() => setShow((s) => ({ ...s, [k]: !s[k] }))}
-      style={{ background: show[k] ? color + "22" : "transparent", border: `1px solid ${show[k] ? color : C.border}`, color: show[k] ? color : C.dim, borderRadius: 5, padding: "3px 7px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap" }}>
-      {label}
-    </button>
-  );
-  const Seg = ({ items, val, set }) => (
-    <div style={{ display: "flex", gap: 2, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 6, padding: 2 }}>
-      {items.map((it) => (
-        <button key={it.key} onClick={() => set(it.key)}
-          style={{ background: val === it.key ? C.amber : "transparent", color: val === it.key ? "#06090D" : C.muted, fontWeight: val === it.key ? 700 : 400, border: "none", borderRadius: 4, padding: "5px 8px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap" }}>
-          {it.label}
-        </button>
-      ))}
-    </div>
-  );
-  const CtrlBtn = ({ onClick, children, title }) => (
-    <button onClick={onClick} title={title}
-      style={{ background: C.panel2, border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, width: 26, height: 26, cursor: "pointer", fontFamily: MONO, fontSize: 12, display: "grid", placeItems: "center" }}>
-      {children}
-    </button>
-  );
-  const StatCell = ({ label, value, color, pctOf }) => {
-    /* pctOf: a price level — show its live distance from price (15s snapshot) */
-    const d = pctOf != null && statPx ? ((pctOf - statPx) / statPx) * 100 : null;
-    return (
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>{label}</div>
-        <div style={{ fontFamily: MONO, fontSize: 12, color: color || C.text, whiteSpace: "nowrap" }}>
-          {value}
-          {d != null && (
-            <span style={{ fontSize: 9, fontWeight: 700, marginLeft: 4, color: d >= 0 ? C.up : C.down }}>
-              {(d >= 0 ? "+" : "") + d.toFixed(1)}%
-            </span>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const Toggle = ({ k, label, color }) => <IndToggle on={!!show[k]} label={label} color={color} onClick={() => setShow((s) => ({ ...s, [k]: !s[k] }))} />;
 
   /* one-tap chart snapshot: the chart canvas + the minute's price and every
      level, composed into a single PNG — built for "screenshot → ask my AI" */
-  const buildShot = () => new Promise((resolve) => {
+  const buildShot = () => {
+    /* SYNCHRONOUS on purpose: toDataURL instead of toBlob, so the share sheet /
+       clipboard call still sits inside the tap's user activation on iOS —
+       an await before navigator.share() is exactly what made it silently no-op */
     const src = canvasRef.current;
-    if (!src || !src.width) { resolve(null); return; }
+    if (!src || !src.width) return null;
     const scale = src.width / Math.max(1, src.clientWidth);
     const lineH = Math.round(17 * scale), pad = Math.round(12 * scale);
     const rows = [
@@ -1294,30 +1399,59 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     ctx.fillStyle = C.text;
     ctx.font = `${Math.round(12 * scale)}px ui-monospace, Menlo, monospace`;
     rows.forEach((r, i) => ctx.fillText(r, pad, src.height + pad + (i + 0.8) * lineH));
-    out.toBlob(resolve, "image/png");
-  });
+    const b64 = out.toDataURL("image/png").split(",")[1];
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return new Blob([u8], { type: "image/png" });
+  };
+  /* bottom toast — every snapshot action reports success or failure right here,
+     because the home-screen alert banner is hidden under this full-screen view */
+  const [toast, setToast] = useState(null); // {msg, ok}
+  const toastRef = useRef(null);
+  const say = (msg, ok) => {
+    setToast({ msg, ok: ok !== false });
+    if (toastRef.current) clearTimeout(toastRef.current);
+    toastRef.current = setTimeout(() => setToast(null), 2600);
+  };
+  useEffect(() => () => { if (toastRef.current) clearTimeout(toastRef.current); }, []);
   const saveShot = async () => {
+    let blob = null;
+    try { blob = buildShot(); } catch (e) {}
+    if (!blob) { say("Nothing to save yet — chart is still loading", false); return; }
+    const file = new File([blob], `${symbol}-chart.png`, { type: "image/png" });
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: `${symbol} chart` }); say("Saved — snapshot shared"); return; }
+      catch (e) { if (e && e.name === "AbortError") { say("Save cancelled", false); return; } }
+    }
     try {
-      const blob = await buildShot();
-      if (!blob) return;
-      const file = new File([blob], `${symbol}-chart.png`, { type: "image/png" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === "AbortError") return; }
-      }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = file.name;
+      document.body.appendChild(a);
       a.click();
-    } catch (e) {}
+      a.remove();
+      say("Saved — check your downloads");
+    } catch (e) { say("Couldn't save the snapshot", false); }
   };
   const copyShot = async () => {
+    let blob = null;
+    try { blob = buildShot(); } catch (e) {}
+    if (!blob) { say("Nothing to copy yet — chart is still loading", false); return; }
     try {
-      /* Safari demands the ClipboardItem inside the tap gesture — pass the promise */
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": buildShot() })]);
-      if (onAlert) onAlert("📋 Chart copied", "Snapshot is on your clipboard — paste it straight to your AI");
-    } catch (e) {
-      if (onAlert) onAlert("Copy blocked", "This browser refused image clipboard — use Save instead");
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") throw new Error("no image clipboard");
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      say("Copied — paste the snapshot into your AI");
+      return;
+    } catch (e) {}
+    /* no image clipboard here (older iOS / some webviews): the share sheet
+       offers Copy as one of its actions */
+    const file = new File([blob], `${symbol}-chart.png`, { type: "image/png" });
+    if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: `${symbol} chart` }); say("Shared — pick Copy or a target"); return; }
+      catch (e) { if (e && e.name === "AbortError") { say("Copy cancelled", false); return; } }
     }
+    say("Copy isn't supported in this browser — use Save", false);
   };
 
   const sidebar = (
@@ -1379,52 +1513,92 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     <div
       onTouchStart={onEdgeStart} onTouchMove={onEdgeMove} onTouchEnd={onEdgeEnd}
       style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 50, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}>
-      <div className="noscrollbar" style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", flexWrap: "nowrap", overflowX: "auto", gap: mobile ? 10 : 16, padding: 16, borderBottom: `1px solid ${C.border}` }}>
-        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, padding: mobile ? "8px 14px" : "10px 18px", cursor: "pointer", fontSize: mobile ? 18 : 22, flexShrink: 0 }}>←</button>
-        <span style={{ fontSize: mobile ? 26 : 32, fontWeight: 800, letterSpacing: 0.5, whiteSpace: "nowrap", flexShrink: 0 }}>{symbol}</span>
-        <span style={{ fontFamily: MONO, fontSize: mobile ? 24 : 30, color: inspBar ? C.amber : C.text, whiteSpace: "nowrap", flexShrink: 0 }}>{fp(dispPrice)}</span>
-        <span style={{ fontFamily: MONO, fontSize: mobile ? 20 : 26, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down, whiteSpace: "nowrap", flexShrink: 0 }}>{fpct(dispPct)}</span>
-        {ahPct != null && (
-          <span style={{ fontFamily: MONO, fontSize: mobile ? 16 : 20, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap", flexShrink: 0 }}>AH {fpct(ahPct)}</span>
-        )}
-        {inspBar && (
-          <span style={{ fontFamily: MONO, fontSize: mobile ? 13 : 16, color: C.dim, whiteSpace: "nowrap", flexShrink: 0 }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
-        )}
+      {/* 1 · price line — sized so ticker + price + % + AH always fit a 390px phone, nothing spills */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", flexWrap: "nowrap", overflow: "hidden", gap: 5, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 7, padding: "5px 9px", cursor: "pointer", fontSize: 15, lineHeight: 1.2, flexShrink: 0 }}>←</button>
         {g && g.grade && (
-          <span style={{ fontFamily: MONO, fontSize: mobile ? 14 : 18, fontWeight: 800, color: gradeColor(g.grade), border: `1px solid ${gradeColor(g.grade)}66`, borderRadius: 6, padding: "3px 10px", whiteSpace: "nowrap", flexShrink: 0 }}>{g.grade} {g.score}</span>
+          <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: "2px 5px", whiteSpace: "nowrap", flexShrink: 0 }}>{g.grade} {g.score}</span>
         )}
-        <span style={{ fontFamily: MONO, fontSize: mobile ? 11 : 13, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "4px 12px", whiteSpace: "nowrap", flexShrink: 0 }}>
-          {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
-        </span>
+        <span style={{ fontSize: 17, fontWeight: 800, letterSpacing: 0, whiteSpace: "nowrap", flexShrink: 0 }}>{symbol}</span>
+        <span style={{ fontFamily: MONO, fontSize: 15, color: inspBar ? C.amber : C.text, whiteSpace: "nowrap", flexShrink: 0 }}>{fp(dispPrice)}</span>
+        <span style={{ fontFamily: MONO, fontSize: 14, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down, whiteSpace: "nowrap", flexShrink: 0 }}>{fpct(dispPct)}</span>
+        {inspBar ? (
+          <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim, whiteSpace: "nowrap", flexShrink: 0 }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
+        ) : ahPct != null ? (
+          <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap", flexShrink: 0 }}>AH {(ahPct >= 0 ? "+" : "") + ahPct.toFixed(1)}%</span>
+        ) : null}
+        {onTogglePref && (
+          <button onClick={() => setAlertsOpen(true)} aria-label={`alerts for ${symbol}`} title="alert rules for this stock"
+            style={{ marginLeft: "auto", background: "transparent", border: "none", color: hasCustom ? C.amber : C.muted, cursor: "pointer", padding: "4px 0 4px 3px", display: "flex", alignItems: "center", flexShrink: 0 }}>
+            <BellIcon size={19} />
+          </button>
+        )}
       </div>
-      <div className="noscrollbar" style={{ display: "flex", gap: 8, padding: 16, borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
+      {/* 2 · catalyst — headline group hugs the left edge, snapshot group the right */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 12, color: C.muted, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "1 1 auto", minWidth: 0 }}>
+          <span style={{ color: news && news.dilution ? C.down : C.dim, flexShrink: 0, display: "flex" }}><NewsIcon size={16} /></span>
+          {news && news.dilution && (
+            <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "2px 6px", flexShrink: 0 }}>DILUTION RISK</span>
+          )}
+          {news ? (
+            <a href={news.url || undefined} target="_blank" rel="noopener noreferrer"
+               style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.text, textDecoration: news.url ? "underline" : "none", textUnderlineOffset: 3, minWidth: 0, flexShrink: 1 }}>
+              {news.headline}
+            </a>
+          ) : (
+            <span style={{ color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>No recent headline for {symbol}.</span>
+          )}
+          {news && (
+            <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h</span>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <button onClick={copyShot} aria-label="copy chart snapshot" title="copy a snapshot of the chart + levels to the clipboard"
+            style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, height: 32, padding: "0 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5, touchAction: "manipulation" }}>
+            <CopyIcon /> Copy
+          </button>
+          <button onClick={saveShot} aria-label="save chart snapshot" title="save a snapshot of the chart + levels as a photo"
+            style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, height: 32, padding: "0 10px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5, touchAction: "manipulation" }}>
+            <SaveIcon /> Save
+          </button>
+        </div>
+      </div>
+      {/* 3 · bar size left, look-back window right */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
         <Seg items={TFS} val={tf} set={setTf} />
         <Seg items={WINS} val={win} set={(k) => { setWin(k); const s = WIN_TF[k]; if (s) setTf(s); }} />
-        <button
-          onClick={() => setReplay((r) => (r ? null : { idx: Math.max(2, Math.floor(barsRef.current.length / 4)), playing: false }))}
-          style={{ background: replay ? C.amber + "22" : "transparent", border: `1px solid ${replay ? C.amber : C.border}`, color: replay ? C.amber : C.dim, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
-          {replay ? "✕ Replay" : "▶ Replay"}
-        </button>
       </div>
-      <div className="noscrollbar" style={{ display: "flex", gap: 6, padding: 16, borderBottom: `1px solid ${C.border}`, overflowX: "auto", flexWrap: "nowrap", alignItems: "center" }}>
-        <Toggle k="vwap" label="VWAP" color={C.vwap} />
-        <Toggle k="e8" label="EMA 8" color={C.ema8} />
-        <Toggle k="e21" label="EMA 21" color={C.ema21} />
-        <Toggle k="e50" label="EMA 50" color={C.ema50} />
-        <Toggle k="pm" label="PM H/L" color={C.amber} />
-        <CtrlBtn onClick={() => zoom(1.3, 0.5)} title="zoom out">−</CtrlBtn>
-        <CtrlBtn onClick={() => zoom(0.75, 0.5)} title="zoom in">+</CtrlBtn>
-        <button
-          onClick={fitAll} aria-label="fit all" title="fit all"
-          onTouchEnd={(e) => { e.preventDefault(); fitAll(); }}
-          style={{ background: following ? "transparent" : C.amber + "22", border: `1px solid ${following ? C.border : C.amber}`, color: following ? C.dim : C.amber, borderRadius: 6, width: 30, height: 30, fontFamily: MONO, fontSize: 14, cursor: "pointer", flexShrink: 0, display: "grid", placeItems: "center" }}>
-          ⟲
-        </button>
-        {err && <span style={{ color: C.down, fontSize: 11, fontFamily: MONO }}>{err}</span>}
+      {/* 4 · indicator toggles left, view controls (zoom / fit / replay) right */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+        <div className="noscrollbar" style={{ display: "flex", alignItems: "center", gap: 4, flex: "1 1 auto", minWidth: 0, overflowX: "auto" }}>
+          <Toggle k="vwap" label="VWAP" color={C.vwap} />
+          <Toggle k="e8" label="EMA 8" color={C.ema8} />
+          <Toggle k="e21" label="EMA 21" color={C.ema21} />
+          <Toggle k="e50" label="EMA 50" color={C.ema50} />
+          <Toggle k="pm" label="PM H/L" color={C.amber} />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+          <CtrlBtn onClick={() => zoom(1.3, 0.5)} title="zoom out">−</CtrlBtn>
+          <CtrlBtn onClick={() => zoom(0.75, 0.5)} title="zoom in">+</CtrlBtn>
+          <button
+            onClick={fitAll} aria-label="fit all" title="fit all"
+            onTouchEnd={(e) => { e.preventDefault(); fitAll(); }}
+            style={{ background: following ? C.panel2 : C.amber + "22", border: `1px solid ${following ? C.border : C.amber}`, color: following ? C.muted : C.amber, borderRadius: 6, width: 30, height: 30, fontFamily: MONO, fontSize: 14, cursor: "pointer", flexShrink: 0, display: "grid", placeItems: "center", touchAction: "manipulation" }}>
+            ⟲
+          </button>
+          <button
+            onClick={() => setReplay((r) => (r ? null : { idx: Math.max(2, Math.floor(barsRef.current.length / 4)), playing: false }))}
+            aria-label="replay" title={replay ? "stop tape replay" : "tape replay"}
+            style={{ background: replay ? C.amber + "22" : C.panel2, border: `1px solid ${replay ? C.amber : C.border}`, color: replay ? C.amber : C.muted, borderRadius: 6, width: 30, height: 30, fontFamily: MONO, fontSize: 12, cursor: "pointer", flexShrink: 0, display: "grid", placeItems: "center", touchAction: "manipulation" }}>
+            {replay ? "■" : "▶"}
+          </button>
+        </div>
       </div>
+      {err && <div style={{ padding: "6px 16px", borderBottom: `1px solid ${C.border}`, color: C.down, fontSize: 11, fontFamily: MONO }}>{err}</div>}
       {replay && (
         /* TAPE REPLAY: scrub the session bar by bar, or press play */
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", borderBottom: `1px solid ${C.border}`, background: C.amber + "0D" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 16px", borderBottom: `1px solid ${C.border}`, background: C.amber + "0D" }}>
           <button
             onClick={() => setReplay((r) => r && { ...r, playing: !r.playing })}
             style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 6, padding: "3px 10px", fontFamily: MONO, fontSize: 11, cursor: "pointer", flexShrink: 0 }}>
@@ -1440,32 +1614,6 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
           </span>
         </div>
       )}
-      {/* catalyst bar — why it's moving, plus one-tap chart snapshots */}
-      <div style={{ display: "flex", gap: 10, alignItems: "center", padding: 16, borderBottom: `1px solid ${C.border}`, fontSize: 12, color: C.muted, minWidth: 0 }}>
-        <span style={{ color: news && news.dilution ? C.down : C.dim, flexShrink: 0 }}><NewsIcon size={16} /></span>
-        {news && news.dilution && (
-          <span style={{ color: C.down, fontFamily: MONO, fontSize: 9, fontWeight: 800, border: `1px solid ${C.down}66`, borderRadius: 4, padding: "2px 6px", flexShrink: 0 }}>DILUTION RISK</span>
-        )}
-        {news ? (
-          <a href={news.url || undefined} target="_blank" rel="noopener noreferrer"
-             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.text, textDecoration: news.url ? "underline" : "none", textUnderlineOffset: 3, minWidth: 0, flexShrink: 1 }}>
-            {news.headline}
-          </a>
-        ) : (
-          <span style={{ color: C.dim, whiteSpace: "nowrap" }}>No recent headline for {symbol}.</span>
-        )}
-        {news && (
-          <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h</span>
-        )}
-        <button onClick={copyShot} aria-label="copy chart snapshot" title="copy a snapshot of the chart + levels to the clipboard"
-          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, cursor: "pointer", flexShrink: 0 }}>
-          ⧉ Copy
-        </button>
-        <button onClick={saveShot} aria-label="save chart snapshot" title="save a snapshot of the chart + levels as a photo"
-          style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "6px 11px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
-          ⬇ Save
-        </button>
-      </div>
       <div style={{ flex: 1, display: "flex", flexDirection: mobile ? "column" : "row", minHeight: 0, overflowY: mobile ? "auto" : "hidden" }}>
         <div style={{ flex: mobile ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, overflowY: mobile ? "visible" : "auto" }}>
           <div className="chartbox" style={{ position: "relative", flex: mobile ? "0 0 auto" : "0 0 52%", height: mobile ? "34vh" : "auto", minHeight: mobile ? 220 : 300, touchAction: "none" }}>
@@ -1477,6 +1625,9 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
             {visBars.length === 0 && !err && (
               <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: C.dim }}>loading…</div>
             )}
+            <span style={{ position: "absolute", top: 8, right: 8, zIndex: 4, fontFamily: MONO, fontSize: 9, letterSpacing: 0.5, color: live ? C.up : C.amber, pointerEvents: "none" }}>
+              {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
+            </span>
             <canvas
               ref={canvasRef}
               onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseLeave}
@@ -1487,71 +1638,24 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
               {mobile ? "hold & drag: inspect · swipe: pan · pinch: zoom" : "drag: pan · scroll: zoom · hover: inspect"}
             </div>
           </div>
-          {/* today's numbers — each level tagged with its live distance from price */}
+          {/* today's numbers */}
           <div style={{ borderTop: `1px solid ${C.border}`, background: C.panel }}>
             <div style={{ padding: "10px 16px 0", fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Today's numbers</div>
             <div style={{ padding: 16, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px 10px" }}>
-              <StatCell label="Day high" value={calc ? fp(calc.dayHi) : "—"} color={C.up} pctOf={calc ? calc.dayHi : null} />
-              <StatCell label="Day low" value={calc ? fp(calc.dayLo) : "—"} color={C.down} pctOf={calc ? calc.dayLo : null} />
+              <StatCell label="Day high" value={calc ? fp(calc.dayHi) : "—"} color={C.up} />
+              <StatCell label="Day low" value={calc ? fp(calc.dayLo) : "—"} color={C.down} />
               <StatCell label="Day vol" value={calc ? fv(calc.dayVol) : "—"} />
               <StatCell label="Float" value={flt ? fv(flt) : "—"} />
-              <StatCell label="PM high" value={calc && calc.pmH != null ? fp(calc.pmH) : "—"} color={C.amber} pctOf={calc ? calc.pmH : null} />
-              <StatCell label="PM low" value={calc && calc.pmL != null ? fp(calc.pmL) : "—"} pctOf={calc ? calc.pmL : null} />
-              <StatCell label={luld ? `LULD ↑ est ${luld.band}%` : "LULD ↑ est"} value={luld ? fp(luld.up) : "—"} color={C.amber} pctOf={luld ? luld.up : null} />
-              <StatCell label={luld ? `LULD ↓ est ${luld.band}%` : "LULD ↓ est"} value={luld ? fp(luld.dn) : "—"} color={C.down} pctOf={luld ? luld.dn : null} />
-              <StatCell label="VWAP" value={calc ? fp(calc.vwapNow) : "—"} color={C.vwap} pctOf={calc ? calc.vwapNow : null} />
-              <StatCell label="EMA 8" value={calc ? fp(calc.e8Now) : "—"} color={C.ema8} pctOf={calc ? calc.e8Now : null} />
-              <StatCell label="EMA 21" value={calc ? fp(calc.e21Now) : "—"} color={C.ema21} pctOf={calc ? calc.e21Now : null} />
-              <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} pctOf={calc ? calc.e50Now : null} />
+              <StatCell label="PM high" value={calc && calc.pmH != null ? fp(calc.pmH) : "—"} color={C.amber} />
+              <StatCell label="PM low" value={calc && calc.pmL != null ? fp(calc.pmL) : "—"} />
+              <StatCell label={luld ? `LULD ↑ est ${luld.band}%` : "LULD ↑ est"} value={luld ? fp(luld.up) : "—"} color={C.amber} />
+              <StatCell label={luld ? `LULD ↓ est ${luld.band}%` : "LULD ↓ est"} value={luld ? fp(luld.dn) : "—"} color={C.down} />
+              <StatCell label="VWAP" value={calc ? fp(calc.vwapNow) : "—"} color={C.vwap} />
+              <StatCell label="EMA 8" value={calc ? fp(calc.e8Now) : "—"} color={C.ema8} />
+              <StatCell label="EMA 21" value={calc ? fp(calc.e21Now) : "—"} color={C.ema21} />
+              <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} />
             </div>
           </div>
-          {/* per-ticker alert customization + price-cross levels */}
-          {onTogglePref && (
-            <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
-              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.border}`, fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>
-                🔔 Alerts for {symbol}
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: 16 }}>
-                {ALERT_CATS.map(([cat, label]) => {
-                  const on = !(prefs && prefs.off && prefs.off.includes(cat));
-                  return (
-                    <button key={cat} onClick={() => onTogglePref(symbol, cat, !on)}
-                      style={{ background: on ? C.up + "1A" : "transparent", border: `1px solid ${on ? C.up : C.border}`, color: on ? C.up : C.dim, borderRadius: 6, padding: "6px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>
-                      {on ? "✓ " : ""}{label}
-                    </button>
-                  );
-                })}
-              </div>
-              <div style={{ padding: "0 16px 6px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
-                Price-cross levels · alerts when price crosses · up to 15
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 16px 16px", alignItems: "center" }}>
-                {((prefs && prefs.lv) || []).map((L) => (
-                  <span key={L} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.amber + "14", border: `1px solid ${C.amber}55`, borderRadius: 6, padding: "5px 9px", fontFamily: MONO, fontSize: 11, color: C.amber }}>
-                    ${fp(L)}
-                    <span onClick={() => onSetLevels(symbol, ((prefs && prefs.lv) || []).filter((x) => x !== L))}
-                      style={{ cursor: "pointer", color: C.muted, fontWeight: 700 }} aria-label={`remove level ${L}`}>×</span>
-                  </span>
-                ))}
-                {((prefs && prefs.lv) || []).length < 15 && (
-                  <>
-                    <input value={lvIn} onChange={(e) => setLvIn(e.target.value)} inputMode="decimal" placeholder="price"
-                      style={{ width: 74, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "6px 8px", fontFamily: MONO, fontSize: 11 }} />
-                    <button
-                      onClick={() => {
-                        const v = Number(lvIn);
-                        if (!isFinite(v) || v <= 0) return;
-                        onSetLevels(symbol, [...new Set([...((prefs && prefs.lv) || []), +v.toFixed(4)])].sort((a, b) => a - b));
-                        setLvIn("");
-                      }}
-                      style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 6, padding: "6px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
-                      + Add level
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
           {/* confluence tracker */}
           <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -1608,6 +1712,70 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
           {sidebar}
         </div>
       </div>
+      {toast && (
+        <div role="status" style={{ position: "fixed", left: "50%", bottom: "calc(22px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 70, maxWidth: "calc(100% - 32px)", background: toast.ok ? "#0F2A1A" : "#2A0F14", border: `1px solid ${toast.ok ? C.up : C.down}`, color: toast.ok ? C.up : C.down, borderRadius: 10, padding: "10px 16px", fontFamily: MONO, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 10px 30px #000000AA", pointerEvents: "none" }}>
+          {toast.ok ? "✓ " : "✕ "}{toast.msg}
+        </div>
+      )}
+      {alertsOpen && onTogglePref && (
+        /* per-ticker alert rules + price-cross levels — a sheet, not a section,
+           so the chart and numbers keep the screen */
+        <div onClick={() => setAlertsOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 60, background: "#000000A6", display: "flex", alignItems: mobile ? "flex-end" : "center", justifyContent: "center", padding: 12, paddingBottom: "calc(12px + env(safe-area-inset-bottom))" }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ width: "100%", maxWidth: 520, maxHeight: "80vh", overflowY: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 14, boxShadow: "0 18px 50px #000000AA" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+              <span style={{ color: C.amber, display: "flex" }}><BellIcon size={16} /></span>
+              <span style={{ fontSize: 10, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Alerts for {symbol}</span>
+              <div style={{ flex: 1 }} />
+              <button onClick={() => setAlertsOpen(false)} aria-label="close alerts"
+                style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>✕</button>
+            </div>
+            <div style={{ padding: "12px 16px 4px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
+              Alert types for this stock · tap to switch off
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "6px 16px 14px" }}>
+              {ALERT_CATS.map(([cat, label]) => {
+                const on = !(prefs && prefs.off && prefs.off.includes(cat));
+                return (
+                  <button key={cat} onClick={() => onTogglePref(symbol, cat, !on)}
+                    style={{ background: on ? C.up + "1A" : "transparent", border: `1px solid ${on ? C.up : C.border}`, color: on ? C.up : C.dim, borderRadius: 6, padding: "6px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>
+                    {on ? "✓ " : ""}{label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ padding: "0 16px 6px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
+              Price-cross levels · alerts when price crosses · up to 15
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 16px 16px", alignItems: "center" }}>
+              {((prefs && prefs.lv) || []).map((L) => (
+                <span key={L} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.amber + "14", border: `1px solid ${C.amber}55`, borderRadius: 6, padding: "5px 9px", fontFamily: MONO, fontSize: 11, color: C.amber }}>
+                  ${fp(L)}
+                  <span onClick={() => onSetLevels(symbol, ((prefs && prefs.lv) || []).filter((x) => x !== L))}
+                    style={{ cursor: "pointer", color: C.muted, fontWeight: 700 }} aria-label={`remove level ${L}`}>×</span>
+                </span>
+              ))}
+              {((prefs && prefs.lv) || []).length < 15 && (
+                <>
+                  <input value={lvIn} onChange={(e) => setLvIn(e.target.value)} inputMode="decimal" placeholder="price"
+                    style={{ width: 74, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "6px 8px", fontFamily: MONO, fontSize: 11 }} />
+                  <button
+                    onClick={() => {
+                      const v = Number(lvIn);
+                      if (!isFinite(v) || v <= 0) return;
+                      onSetLevels(symbol, [...new Set([...((prefs && prefs.lv) || []), +v.toFixed(4)])].sort((a, b) => a - b));
+                      setLvIn("");
+                    }}
+                    style={{ background: "transparent", border: `1px solid ${C.amber}`, color: C.amber, borderRadius: 6, padding: "6px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>
+                    + Add level
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1625,7 +1793,6 @@ export default function App() {
   const [maxPrice, setMaxPrice] = useState(100);
   const [minDayVol, setMinDayVol] = useState(5000000);
   const [running, setRunning] = useState(false);
-  const [paused, setPaused] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [gainers, setGainers] = useState([]);
@@ -1649,6 +1816,23 @@ export default function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [srvCfg, setSrvCfg] = useState(null); // {serverKeys, invite, feed} — server-held-keys mode
   const [invite, setInvite] = useState("");
+  const [account, setAccount] = useState(null); // {provider, email, plan, createdAt} — preview: on-device only
+  const accountRef = useRef(null);
+  const [acctOpen, setAcctOpen] = useState(false);
+  const saveAccount = useCallback((a) => {
+    accountRef.current = a;
+    setAccount(a);
+    if (a) { try { window.storage.set("account", JSON.stringify(a)); } catch (e) {} }
+    else { try { window.storage.delete("account"); } catch (e) {} }
+  }, []);
+  useEffect(() => {
+    (async () => {
+      try {
+        const ar = await window.storage.get("account");
+        if (ar && ar.value) { const a = JSON.parse(ar.value); accountRef.current = a; setAccount(a); }
+      } catch {}
+    })();
+  }, []);
 
   /* server mode discovery + a stable per-device id */
   useEffect(() => {
@@ -1674,7 +1858,7 @@ export default function App() {
     try {
       const r = await fetch("/auth/claim", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: invite.trim(), device: DEVICE.id }),
+        body: JSON.stringify({ code: invite.trim(), device: DEVICE.id, account: account ? { email: account.email, provider: account.provider, plan: account.plan } : undefined }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "access denied");
@@ -1684,7 +1868,7 @@ export default function App() {
       try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}
       setRunning(true);
     } catch (e) { setErr(String(e.message || e)); }
-  }, [invite, srvCfg, maxPrice, minDayVol]);
+  }, [invite, srvCfg, maxPrice, minDayVol, account]);
 
   /* the server's device store is ephemeral across deploys — re-claim
      silently on boot so a running device never gets locked out */
@@ -1719,7 +1903,8 @@ export default function App() {
   const finishOnboard = useCallback(() => {
     setOnboardOpen(false);
     try { window.storage.set("onboard-seen", "1"); } catch (e) {}
-  }, []);
+    if (onboardMode === "first" && !accountRef.current) setAcctOpen(true);
+  }, [onboardMode]);
   const openHelp = useCallback(() => { setOnboardMode("help"); setOnboardOpen(true); }, []);
 
   /* per-ticker notification prefs: switched-off categories + up to 15
@@ -2146,11 +2331,11 @@ export default function App() {
     }
   }, [keys, feed, maxPrice, minDayVol]);
   useEffect(() => {
-    if (!running || paused) return;
+    if (!running) return;
     sweep();
     const id = setInterval(sweep, feed === "sip" ? 60000 : 300000);
     return () => clearInterval(id);
-  }, [running, paused, sweep]);
+  }, [running, sweep]);
 
   /* float lookup with per-symbol cache */
   const getFloat = useCallback((sym) => {
@@ -2335,7 +2520,7 @@ export default function App() {
   }, [keys, feed, alertOnce, getFloat, prefOff]);
   useEffect(() => { ignScanRef.current = ignScan; }, [ignScan]);
   useEffect(() => {
-    if (!running || paused) return;
+    if (!running) return;
     ignScan();
     let lastFull = Date.now();
     /* during after hours the scan piggybacks on the 15s watchlist refresh;
@@ -2345,7 +2530,7 @@ export default function App() {
       if (!inAfterHours() && now - lastFull >= 60000) { lastFull = now; ignScan(); }
     }, 10000);
     return () => clearInterval(id);
-  }, [running, paused, ignScan]);
+  }, [running, ignScan]);
 
   const refresh = useCallback(async () => {
     if (busy.current) return;
@@ -2485,17 +2670,17 @@ export default function App() {
     } catch (e) {}
   }, [keys]);
   useEffect(() => {
-    if (!running || paused) return;
+    if (!running) return;
     newsTick();
     const id = setInterval(newsTick, 60000);
     return () => clearInterval(id);
-  }, [running, paused, newsTick]);
+  }, [running, newsTick]);
   useEffect(() => {
-    if (!running || paused) return;
+    if (!running) return;
     refresh();
     const id = setInterval(refresh, 15000); /* full re-rank + scoring */
     return () => clearInterval(id);
-  }, [running, paused, refresh]);
+  }, [running, refresh]);
 
   /* LIVE prices: daily bars only re-aggregate ~once a minute, so the rows
      poll the real-time latest-trade endpoint instead — the main watchlist AND
@@ -2541,11 +2726,11 @@ export default function App() {
     } catch (e) {}
   }, [keys, feed, checkLevels]);
   useEffect(() => {
-    if (!running || paused) return;
+    if (!running) return;
     priceTick();
     const id = setInterval(priceTick, 3000);
     return () => clearInterval(id);
-  }, [running, paused, priceTick]);
+  }, [running, priceTick]);
 
   const connect = async () => {
     setErr("");
@@ -2590,6 +2775,24 @@ export default function App() {
             EMA stack, Supertrend, momentum, volume surge) — with lock-screen
             push alerts via the server monitor.
           </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px", marginBottom: 12, fontSize: 12 }}>
+            {account ? (
+              <>
+                <span style={{ color: C.up, fontWeight: 700 }}>●</span>
+                <span style={{ color: C.muted, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{acctLabel(account)}</span>
+                <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: account.plan === "pro" ? C.amber : C.dim, border: `1px solid ${account.plan === "pro" ? C.amber + "66" : C.border}`, borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>{account.plan === "pro" ? "PRO" : "FREE"}</span>
+                <div style={{ flex: 1 }} />
+                <span onClick={() => setAcctOpen(true)} style={{ color: C.dim, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, flexShrink: 0 }}>Plan</span>
+                <span onClick={() => saveAccount(null)} style={{ color: C.dim, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, flexShrink: 0 }}>Sign out</span>
+              </>
+            ) : (
+              <>
+                <span style={{ color: C.muted }}>Not signed in</span>
+                <div style={{ flex: 1 }} />
+                <span onClick={() => setAcctOpen(true)} style={{ color: C.amber, cursor: "pointer", fontWeight: 700 }}>Create account →</span>
+              </>
+            )}
+          </div>
           <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
             {srvCfg && srvCfg.serverKeys ? (
               /* SERVER-KEYS MODE: live data is included — no API keys, ever */
@@ -2656,6 +2859,7 @@ export default function App() {
           </div>
         </div>
         {onboardOpen && <OnboardSlides mode={onboardMode} onDone={finishOnboard} onSkip={finishOnboard} />}
+        {acctOpen && !onboardOpen && <AccountFlow onDone={(a) => { saveAccount(a); setAcctOpen(false); }} onSkip={() => setAcctOpen(false)} />}
         {aboutOpen && <AboutPage onClose={() => setAboutOpen(false)} />}
       </div>
     );
@@ -2667,7 +2871,12 @@ export default function App() {
       <div style={{ position: "sticky", top: 0, zIndex: 10, background: C.bg + "F2", backdropFilter: "blur(6px)", borderBottom: `1px solid ${C.border}`, padding: "10px 14px", paddingTop: "calc(10px + env(safe-area-inset-top))", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.amber }}>RANKED BY SETUP SCORE</div>
-          <div style={{ fontSize: 17, fontWeight: 800 }}>Momentum Scanner</div>
+          <div style={{ fontSize: 17, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}>
+            Momentum Scanner
+            {account && account.plan === "pro" && (
+              <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: C.amber, border: `1px solid ${C.amber}66`, borderRadius: 4, padding: "1px 5px" }}>PRO</span>
+            )}
+          </div>
         </div>
         <div style={{ flex: 1 }} />
         <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>
@@ -2675,13 +2884,9 @@ export default function App() {
             ? `PREMARKET · ≤$${maxPrice} · ≥${fv(PM_MIN_VOL)} PM vol · ≥${PM_PCT_FLOOR}% gap · ${found} movers`
             : `≤$${maxPrice} · ≥${fv(minDayVol)} vol · ≥25% day · ${found} movers`} · {feedMode(feed).short} · {updated ? `upd ${ftime(updated)} ET` : "loading…"}
         </span>
-        <button onClick={toggleAlerts}
-          style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
-          🔔 {alertsOn ? (pushArmed ? "Lock-screen" : "On") : "Off"}
-        </button>
-        <button onClick={() => setPaused((p) => !p)}
-          style={{ background: paused ? C.up + "22" : "transparent", border: `1px solid ${paused ? C.up : C.border}`, color: paused ? C.up : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
-          {paused ? "▶ Resume" : "❚❚ Pause"}
+        <button onClick={toggleAlerts} aria-label={alertsOn ? "alerts on — tap to switch off" : "alerts off — tap to switch on"}
+          style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO, display: "flex", alignItems: "center", gap: 6 }}>
+          <BellIcon muted={!alertsOn} /> {alertsOn ? (pushArmed ? "Lock-screen" : "On") : "Off"}
         </button>
         <button onClick={openHelp} aria-label="watch the feature walkthrough" title="feature walkthrough"
           style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
@@ -2691,7 +2896,7 @@ export default function App() {
           style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
           ⓘ
         </button>
-        <button onClick={() => { setRunning(false); setPaused(false); }}
+        <button onClick={() => setRunning(false)}
           style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>
           Settings
         </button>

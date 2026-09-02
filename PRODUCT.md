@@ -99,3 +99,15 @@ requires per-user real-time display entitlements to function.
   one-time "What's new" slide.
 - Disclosures move to an ⓘ-opened About page; home screen keeps only a
   one-line "Not financial advice" in small type.
+
+## Accounts & plans (preview)
+
+- First run: walkthrough → **Create account** (Continue with Apple / Google /
+  email) → **Choose your plan** (Free vs Pro, $9.99/mo, 7-day trial) → connect.
+- Sign-in and billing are **simulated on the device** in this build: no
+  identity provider or payment processor is wired. The account
+  ({provider, email, plan}) is stored locally and echoed to the server with
+  the device claim so the operator can see who is on which plan. Real
+  Sign in with Apple / Google and App Store billing land with the native
+  shell (Phase 2). Nothing in the app is feature-gated by plan yet — the
+  comparison table is the promise, per the Option B business goal above.
