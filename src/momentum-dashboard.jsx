@@ -1379,21 +1379,21 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     <div
       onTouchStart={onEdgeStart} onTouchMove={onEdgeMove} onTouchEnd={onEdgeEnd}
       style={{ position: "fixed", inset: 0, background: C.bg, zIndex: 50, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap", gap: "8px 16px", padding: 16, borderBottom: `1px solid ${C.border}` }}>
-        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, padding: "10px 18px", cursor: "pointer", fontSize: 22 }}>←</button>
-        <span style={{ fontSize: 32, fontWeight: 800, letterSpacing: 0.5 }}>{symbol}</span>
-        <span style={{ fontFamily: MONO, fontSize: 30, color: inspBar ? C.amber : C.text }}>{fp(dispPrice)}</span>
-        <span style={{ fontFamily: MONO, fontSize: 26, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down }}>{fpct(dispPct)}</span>
+      <div className="noscrollbar" style={{ display: "flex", alignItems: "center", justifyContent: "flex-start", flexWrap: "nowrap", overflowX: "auto", gap: mobile ? 10 : 16, padding: 16, borderBottom: `1px solid ${C.border}` }}>
+        <button onClick={onClose} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, padding: mobile ? "8px 14px" : "10px 18px", cursor: "pointer", fontSize: mobile ? 18 : 22, flexShrink: 0 }}>←</button>
+        <span style={{ fontSize: mobile ? 26 : 32, fontWeight: 800, letterSpacing: 0.5, whiteSpace: "nowrap", flexShrink: 0 }}>{symbol}</span>
+        <span style={{ fontFamily: MONO, fontSize: mobile ? 24 : 30, color: inspBar ? C.amber : C.text, whiteSpace: "nowrap", flexShrink: 0 }}>{fp(dispPrice)}</span>
+        <span style={{ fontFamily: MONO, fontSize: mobile ? 20 : 26, fontWeight: 700, color: (dispPct || 0) >= 0 ? C.up : C.down, whiteSpace: "nowrap", flexShrink: 0 }}>{fpct(dispPct)}</span>
         {ahPct != null && (
-          <span style={{ fontFamily: MONO, fontSize: 20, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>AH {fpct(ahPct)}</span>
+          <span style={{ fontFamily: MONO, fontSize: mobile ? 16 : 20, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap", flexShrink: 0 }}>AH {fpct(ahPct)}</span>
         )}
         {inspBar && (
-          <span style={{ fontFamily: MONO, fontSize: 16, color: C.dim }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
+          <span style={{ fontFamily: MONO, fontSize: mobile ? 13 : 16, color: C.dim, whiteSpace: "nowrap", flexShrink: 0 }}>{daily ? fdate(inspBar.t) : ftime(inspBar.t) + " ET"}</span>
         )}
         {g && g.grade && (
-          <span style={{ fontFamily: MONO, fontSize: 18, fontWeight: 800, color: gradeColor(g.grade), border: `1px solid ${gradeColor(g.grade)}66`, borderRadius: 6, padding: "3px 10px" }}>{g.grade} {g.score}</span>
+          <span style={{ fontFamily: MONO, fontSize: mobile ? 14 : 18, fontWeight: 800, color: gradeColor(g.grade), border: `1px solid ${gradeColor(g.grade)}66`, borderRadius: 6, padding: "3px 10px", whiteSpace: "nowrap", flexShrink: 0 }}>{g.grade} {g.score}</span>
         )}
-        <span style={{ fontFamily: MONO, fontSize: 13, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "4px 12px", whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: MONO, fontSize: mobile ? 11 : 13, color: live ? C.up : C.amber, border: `1px solid ${live ? C.up : C.amber}55`, borderRadius: 99, padding: "4px 12px", whiteSpace: "nowrap", flexShrink: 0 }}>
           {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
         </span>
       </div>
@@ -1412,7 +1412,6 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
         <Toggle k="e21" label="EMA 21" color={C.ema21} />
         <Toggle k="e50" label="EMA 50" color={C.ema50} />
         <Toggle k="pm" label="PM H/L" color={C.amber} />
-        <div style={{ flex: 1 }} />
         <CtrlBtn onClick={() => zoom(1.3, 0.5)} title="zoom out">−</CtrlBtn>
         <CtrlBtn onClick={() => zoom(0.75, 0.5)} title="zoom in">+</CtrlBtn>
         <button
@@ -1449,11 +1448,11 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
         )}
         {news ? (
           <a href={news.url || undefined} target="_blank" rel="noopener noreferrer"
-             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.text, textDecoration: news.url ? "underline" : "none", textUnderlineOffset: 3, minWidth: 0, flex: 1 }}>
+             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.text, textDecoration: news.url ? "underline" : "none", textUnderlineOffset: 3, minWidth: 0, flexShrink: 1 }}>
             {news.headline}
           </a>
         ) : (
-          <span style={{ color: C.dim, flex: 1 }}>No recent headline for {symbol}.</span>
+          <span style={{ color: C.dim, whiteSpace: "nowrap" }}>No recent headline for {symbol}.</span>
         )}
         {news && (
           <span style={{ color: C.dim, fontFamily: MONO, fontSize: 9, flexShrink: 0 }}>{Math.max(1, Math.round((Date.now() - news.at) / 3600000))}h</span>
