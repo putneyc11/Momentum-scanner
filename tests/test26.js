@@ -75,11 +75,36 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   console.log(b1.includes('Confluence tracker') ? '✓ tapping a row opens the Advanced view directly' : '✗ Advanced view did not open');
   console.log(b1.includes('⟲') ? '✓ icon-only fit-all control present' : '✗ fit-all control missing');
   console.log(b1.includes('LULD') ? '✓ estimated LULD halt bands shown in the stats strip' : '✗ LULD estimate missing');
-  console.log(b1.includes('Replay') ? '✓ tape-replay control present' : '✗ Replay control missing');
+  const replayBtn = await page.evaluate(() => { const b = document.querySelector('button[aria-label="replay"]'); return b ? b.textContent.trim() : null; });
+  console.log(replayBtn === '▶' ? '✓ icon-only replay control sits in the view-controls row' : '✗ replay control wrong: ' + JSON.stringify(replayBtn));
+  // the four top bars must never spill past the phone's edge — and the price line is ONE line
+  const bars = await page.evaluate(() => {
+    const back = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '←');
+    const hdr = back && back.parentElement;
+    if (!hdr) return null;
+    const rows = [hdr, hdr.nextElementSibling, hdr.nextElementSibling.nextElementSibling, hdr.nextElementSibling.nextElementSibling.nextElementSibling];
+    const vw = window.innerWidth;
+    const kids = [...hdr.children].map(k => Math.round(k.getBoundingClientRect().top));
+    const replay = document.querySelector('button[aria-label="replay"]').getBoundingClientRect();
+    const save = document.querySelector('button[aria-label="save chart snapshot"]').getBoundingClientRect();
+    return {
+      spill: rows.map(r => r.scrollWidth - r.clientWidth),
+      right: rows.map(r => Math.round(r.getBoundingClientRect().right)), vw,
+      oneLine: Math.max(...kids) - Math.min(...kids) < 12,
+      left: Math.round(hdr.firstElementChild.getBoundingClientRect().left),
+      replayRightGap: Math.round(vw - replay.right), saveRightGap: Math.round(vw - save.right),
+    };
+  });
+  console.log(bars && bars.spill.every(x => x <= 0) && bars.oneLine ? `✓ header/news/timeframe/toggle bars fit the 390px screen with no overflow (one-line price row)` : '✗ top bars overflow: ' + JSON.stringify(bars));
+  console.log(bars && bars.left === 16 && bars.replayRightGap === 16 && bars.saveRightGap === 16 ? '✓ left groups hug the left edge, right groups (Save · replay) hug the right edge' : '✗ group alignment off: ' + JSON.stringify(bars));
   console.log(b1.includes("Today's numbers") ? '✓ stats section carries its title' : '✗ stats title missing');
-  console.log(b1.includes('Alerts for GOODA') ? '✓ per-ticker alert customization section present' : '✗ alerts section missing');
+  console.log(!b1.includes('Alerts for GOODA') ? '✓ alert rules no longer occupy a persistent section' : '✗ alerts section still inline');
+  const dayHi = await page.evaluate(() => { const l = [...document.querySelectorAll('div')].find(d => d.textContent === 'Day high'); return l ? l.nextElementSibling.textContent.trim() : null; });
+  console.log(dayHi && /^\d+\.\d+$/.test(dayHi) ? `✓ stat cells show the level only — no up/down % tags (${dayHi})` : '✗ % tag still on stat cell: ' + JSON.stringify(dayHi));
+  await page.click('button[aria-label="alerts for GOODA"]');
+  await page.waitForTimeout(300);
+  console.log((await page.textContent('#root')).includes('Alerts for GOODA') ? '✓ outline bell opens the per-ticker alerts sheet' : '✗ alerts sheet did not open');
   console.log(b1.includes('Copy') && b1.includes('Save') ? '✓ chart snapshot Copy/Save live in the news bar' : '✗ snapshot buttons missing');
-  // add a price-cross level
   await page.fill('input[placeholder="price"]', '2.50');
   await page.click('button:has-text("+ Add level")');
   await page.waitForTimeout(400);
@@ -92,11 +117,32 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.waitForTimeout(300);
   const storedPrefs2 = await page.evaluate(() => JSON.parse(localStorage.getItem('alert-prefs') || '{}'));
   console.log(storedPrefs2.GOODA && storedPrefs2.GOODA.off && storedPrefs2.GOODA.off.includes('vwap') ? '✓ per-ticker category toggle persists (vwap off for GOODA)' : '✗ category toggle not stored');
-  await page.click('button:has-text("Replay")');
+  await page.click('button[aria-label="close alerts"]');
+  await page.waitForTimeout(200);
+  console.log(!(await page.textContent('#root')).includes('Alerts for GOODA') ? '✓ sheet closes and gives the screen back' : '✗ alerts sheet stuck open');
+  const tf = await page.evaluate(() => {
+    const segs = [...document.querySelectorAll('button')].filter(b => /^(1m|5m|15m|1h|1D|5D|1M|3M|6M|1Y|5Y)$/.test(b.textContent.trim())).map(b => b.getBoundingClientRect());
+    const save = document.querySelector('button[aria-label="save chart snapshot"]');
+    return { n: segs.length, minH: Math.min(...segs.map(r => r.height)), minW: Math.min(...segs.map(r => r.width)), saveSvg: !!(save && save.querySelector('svg')), saveGlyph: save ? /⬇/.test(save.textContent) : null };
+  });
+  console.log(tf.n === 12 && tf.minH >= 32 && tf.minW >= 26 ? `✓ timeframe buttons are real tap targets (${Math.round(tf.minW)}×${Math.round(tf.minH)}px minimum)` : '✗ timeframe tap targets too small: ' + JSON.stringify(tf));
+  console.log(tf.saveSvg && !tf.saveGlyph ? '✓ Save uses an outline icon' : '✗ Save icon wrong: ' + JSON.stringify(tf));
+  await page.click('button:has-text("15m")');
+  await page.waitForTimeout(500);
+  const tfSel = await page.evaluate(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim() === '15m'); return b && getComputedStyle(b).fontWeight; });
+  console.log(String(tfSel) === '700' ? '✓ tapping a timeframe selects it' : '✗ timeframe tap ignored: ' + tfSel);
+  await page.click('button:has-text("1m")');
+  await page.waitForTimeout(500);
+  await page.click('button[aria-label="copy chart snapshot"]');
+  await page.waitForTimeout(500);
+  const toast = await page.evaluate(() => { const t = document.querySelector('[role="status"]'); return t ? t.textContent : null; });
+  console.log(toast && /Copied|Copy|copy/.test(toast) ? `✓ Copy reports its outcome in a bottom toast (${JSON.stringify(toast)})` : '✗ no toast after Copy: ' + JSON.stringify(toast));
+  // add a price-cross level
+  await page.click('button[aria-label="replay"]');
   await page.waitForTimeout(400);
   const hasSlider = await page.evaluate(() => !!document.querySelector('input[type="range"]'));
   console.log(hasSlider ? '✓ replay scrubber appears when Replay is toggled on' : '✗ replay scrubber missing');
-  await page.click('button:has-text("✕ Replay")');
+  await page.click('button[aria-label="replay"]');
   await page.waitForTimeout(300);
   console.log(!b1.includes('Advanced view') ? '✓ no intermediate preview step' : '✗ preview card leaked into the flow');
 

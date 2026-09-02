@@ -103,6 +103,18 @@ REPS = [
      'try { localStorage.setItem("device-id", id); } catch (e) {}'),
     ('try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}',
      'try { localStorage.setItem("alpaca-keys", JSON.stringify(sv)); } catch (e) {}'),
+    ('''      try {
+        const ar = await window.storage.get("account");
+        if (ar && ar.value) { const a = JSON.parse(ar.value); accountRef.current = a; setAccount(a); }
+      } catch {}''',
+     '''      try {
+        const araw = localStorage.getItem("account");
+        if (araw) { const a = JSON.parse(araw); accountRef.current = a; setAccount(a); }
+      } catch {}'''),
+    ('if (a) { try { window.storage.set("account", JSON.stringify(a)); } catch (e) {} }',
+     'if (a) { try { localStorage.setItem("account", JSON.stringify(a)); } catch (e) {} }'),
+    ('else { try { window.storage.delete("account"); } catch (e) {} }',
+     'else { try { localStorage.removeItem("account"); } catch (e) {} }'),
     ('export default function App()', 'function App()'),
 ]
 

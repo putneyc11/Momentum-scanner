@@ -52,11 +52,24 @@ function bars1(n) { const a = []; for (let i = 0; i < n; i++) { const c = 1 + i 
   for (let i = 0; i < 5; i++) { await page.click('button:has-text("Next →")'); await page.waitForTimeout(200); }
   const a1 = await page.textContent('#root');
   console.log(a1.includes('Your alerts, your rules') ? '✓ Next steps through all six slides' : '✗ slide navigation broken: ' + a1.slice(0, 120));
-  console.log(a1.includes('Connect Alpaca') ? '✓ last slide CTA hands off to key entry' : '✗ final CTA missing');
-  await page.click('button:has-text("Connect Alpaca")');
+  console.log(a1.includes('Create account') ? '✓ last slide CTA hands off to account creation' : '✗ final CTA missing');
+  await page.click('button:has-text("Create account")');
   await page.waitForTimeout(400);
   const a2 = await page.textContent('#root');
-  console.log(!a2.includes('The market opens at 4 AM') && a2.includes('Start scanning') ? '✓ finishing lands on the connect screen' : '✗ walkthrough did not close to connect');
+  console.log(!a2.includes('The market opens at 4 AM') && a2.includes('Create your account') && a2.includes('Continue with Apple') && a2.includes('Continue with Google') && a2.includes('Continue with email') ? '✓ sign-up offers Apple, Google and email' : '✗ sign-up screen wrong');
+  await page.click('button:has-text("Continue with email")');
+  await page.waitForTimeout(200);
+  await page.fill('input[type="email"]', 'corey@example.com');
+  await page.click('button:has-text("Continue")');
+  await page.waitForTimeout(300);
+  const a3 = await page.textContent('#root');
+  console.log(a3.includes('Choose your plan') && a3.includes('Free') && a3.includes('Pro · $9.99/mo') && a3.includes('Lock-screen push') && a3.includes('15-min delayed') ? '✓ plan picker shows Free vs Pro perks side by side' : '✗ plan screen wrong');
+  await page.click('button:has-text("Continue with Free")');
+  await page.waitForTimeout(400);
+  const a4 = await page.textContent('#root');
+  const acct = await page.evaluate(() => JSON.parse(localStorage.getItem('account') || 'null'));
+  console.log(!a4.includes('Choose your plan') && a4.includes('Start scanning') && a4.includes('corey@example.com') && a4.includes('FREE') ? '✓ finishing lands on the connect screen, signed in on the Free plan' : '✗ account hand-off broken');
+  console.log(acct && acct.email === 'corey@example.com' && acct.plan === 'free' && acct.provider === 'email' ? '✓ account persisted on the device' : '✗ account not stored: ' + JSON.stringify(acct));
   const flag = await page.evaluate(() => localStorage.getItem('onboard-seen'));
   console.log(flag === '1' ? '✓ onboard-seen stamped — walkthrough will not auto-show again' : '✗ flag not stored: ' + JSON.stringify(flag));
 
