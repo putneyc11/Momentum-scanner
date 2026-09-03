@@ -384,17 +384,17 @@ function drawChart(canvas, bars, opts) {
     if (l.price == null) continue;
     const yy = y(l.price);
     if (yy < padT - 4 || yy > padT + ph + 4) continue;
-    const col = l.kind === "pmh" ? C.amber : "#5A7184";
+    const col = l.kind === "pmh" ? C.amber : l.kind === "sup" ? C.up : l.kind === "res" ? C.down : "#5A7184";
     ctx.strokeStyle = col + "BB";
     ctx.setLineDash([5, 4]);
     ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
     ctx.setLineDash([]);
     if (o.axes) {
       /* opaque chips so PMH/PML never garble the price ticks; PML sits BELOW its line */
-      const pmTxt = (l.kind === "pmh" ? "PMH $" : "PML $") + fp(l.price);
+      const pmTxt = (l.kind === "pmh" ? "PMH $" : l.kind === "pml" ? "PML $" : (l.label || (l.kind === "sup" ? "S" : "R")) + " $") + fp(l.price);
       ctx.font = `bold 9px ${MONO}`;
       const tw = ctx.measureText(pmTxt).width;
-      const ty = l.kind === "pmh" ? yy - 4 : yy + 12;
+      const ty = l.kind === "pmh" || l.kind === "res" ? yy - 4 : yy + 12;
       ctx.fillStyle = "#0A0E13";
       ctx.fillRect(W - padR + 2, ty - 8, tw + 7, 11);
       ctx.fillStyle = col;
@@ -555,7 +555,7 @@ function NewsIcon({ size }) {
 /* ---------------- watchlist row ---------------- */
 /* per-ticker alert categories a user can switch off individually */
 const ALERT_CATS = [
-  ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
+  ["setup", "Setup pushes"], ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
   ["mom3", "3 green"], ["vol", "Volume surge"], ["halt", "Halts"], ["rot", "Rotation"],
 ];
 
@@ -927,6 +927,10 @@ function AboutPage({ onClose }) {
         </S>
         <S title="Alerts & push">
           The bell on each row arms alerts for just that stock — in-app banners plus lock-screen push (mutes reset each new day). Lock-screen push requires the bell enabled and, on iPhone, the app added to the Home Screen; the server must be awake to monitor — keep it pinged or on a paid instance.
+          Lock-screen pushes fire on confluence, not single events: at least three of VWAP, EMA stack, volume, high-of-day and three-green must line up on the same bar (four over the lunch chop), a stock re-pushes only when it escalates or starts a fresh leg, each stock is capped per day and the feed per hour, and overflow rolls into one digest. Every push is journaled with its 5, 15 and 30-minute follow-through; the alert center shows the running hit rate.
+        </S>
+        <S title="AI trade plans">
+          The Advanced view can ask a language model for support and resistance plus three long-only scenarios, built only from numbers the server computes off today's tape. It is generated text: it can be wrong, it does not know news you do, and it is never a recommendation. Nothing is sent until you tap Analyze, and plans are cached for five minutes.
         </S>
         <S title="Data & keys">
           Market data comes from your own Alpaca keys, entered in Settings and stored on this device; the push server keeps a copy solely to monitor your watchlist.
@@ -992,7 +996,7 @@ const StatCell = ({ label, value, color }) => (
   </div>
 );
 
-function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, onSetLevels, onClose, onAlert }) {
+function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onTogglePref, onSetLevels, onClose, onAlert }) {
   const width = useWidth();
   const mobile = width < 720;
   const [tf, setTf] = useState("1Min");
@@ -1022,6 +1026,16 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
 
   const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
   const [alertsOpen, setAlertsOpen] = useState(false); // per-ticker alert sheet (bell in the header)
+  /* AI trade plan: levels + three long-only scenarios, built server-side from the tape */
+  const [plan, setPlan] = useState(null);
+  const [planT, setPlanT] = useState(0);
+  const [planPx, setPlanPx] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
+  const [planErr, setPlanErr] = useState("");
+  const [planLines, setPlanLines] = useState(true);
+  const [planTick, setPlanTick] = useState(0);
+  useEffect(() => { setPlan(null); setPlanT(0); setPlanPx(null); setPlanErr(""); }, [symbol]);
+  useEffect(() => { if (!plan) return; const id = setInterval(() => setPlanTick((x) => x + 1), 30000); return () => clearInterval(id); }, [plan]);
   const [lvIn, setLvIn] = useState(""); // price-level alert input
 
   const tfObj = TFS.find((t) => t.key === tf);
@@ -1199,9 +1213,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
   }, [bars, show, daily, g, pm]);
 
   const visLines = calc ? calc.lines.map((l) => ({ ...l, vals: l.vals.slice(vo, vo + vc) })) : [];
-  const pmLines = show.pm && calc && !daily
-    ? [{ price: calc.pmH, kind: "pmh" }, { price: calc.pmL, kind: "pml" }]
-    : [];
+  const pmLines = [
+    ...(show.pm && calc && !daily ? [{ price: calc.pmH, kind: "pmh" }, { price: calc.pmL, kind: "pml" }] : []),
+    ...(plan && planLines ? plan.levels.map((l) => ({ price: l.price, kind: l.kind === "support" ? "sup" : "res", label: l.label })) : []),
+  ];
   const crossRel = crossAbs != null && crossAbs >= vo && crossAbs < vo + vc ? { i: crossAbs - vo } : null;
   const conf = useMemo(() => confluence(bars), [bars]);
 
@@ -1415,6 +1430,46 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     toastRef.current = setTimeout(() => setToast(null), 2600);
   };
   useEffect(() => () => { if (toastRef.current) clearTimeout(toastRef.current); }, []);
+  const analyze = async (fresh) => {
+    if (planBusy) return;
+    setPlanBusy(true); setPlanErr("");
+    try {
+      const r = await fetch("/plan", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "APCA-API-KEY-ID": (keys.id || "").trim(), "APCA-API-SECRET-KEY": (keys.secret || "").trim(),
+          ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}),
+        },
+        body: JSON.stringify({ symbol, feed: feedMode(feed).delayMs ? "iex" : feed, fresh: !!fresh, news: news ? news.headline : null, float: flt || null, grade: g && g.grade, score: g && g.score }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.plan) throw new Error(j.error || `${r.status} ${r.statusText}`);
+      setPlan(j.plan); setPlanT(j.t || Date.now()); setPlanPx(price);
+      if (j.cached && fresh) say("Plan is under a minute old — showing it", true);
+    } catch (e) { setPlanErr(String(e.message || e)); }
+    setPlanBusy(false);
+  };
+  const planText = () => {
+    if (!plan) return "";
+    const L = (v) => "$" + fp(v);
+    const lines = [`${symbol} trade plan — ${plan.bias.toUpperCase()} · ${ftime(planT)} ET at ${L(planPx)}`, plan.summary, ""];
+    lines.push("Levels:");
+    for (const l of [...plan.levels].reverse()) lines.push(`  ${l.kind === "support" ? "S" : "R"} ${L(l.price)} · ${l.label} (${l.strength}/3)`);
+    if (plan.must_hold != null) lines.push(`Must hold ${L(plan.must_hold)} · must fail ${plan.must_fail != null ? L(plan.must_fail) : "—"}`);
+    for (const sc of plan.scenarios) {
+      lines.push("", `${sc.name} (${sc.stance}): ${sc.trigger}`);
+      if (sc.stance === "long") lines.push(`  entry ${sc.entry_lo != null ? L(sc.entry_lo) + "–" + L(sc.entry_hi) : "—"} · stop ${sc.stop != null ? L(sc.stop) : "—"} · targets ${sc.targets.map(L).join(" → ") || "—"}`);
+      if (sc.invalidation) lines.push(`  invalid if: ${sc.invalidation}`);
+      if (sc.note) lines.push(`  ${sc.note}`);
+    }
+    lines.push("", plan.risk_notes, "AI-generated · not financial advice");
+    return lines.join("\n");
+  };
+  const copyPlan = async () => {
+    try { await navigator.clipboard.writeText(planText()); say("Plan copied"); }
+    catch (e) { say("Couldn't copy the plan", false); }
+  };
   const saveShot = async () => {
     let blob = null;
     try { blob = buildShot(); } catch (e) {}
@@ -1656,6 +1711,91 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
               <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} />
             </div>
           </div>
+          {/* AI trade plan — support/resistance + three long-only scenarios, on demand */}
+          {plans && (() => {
+            const ageMin = plan ? Math.max(0, Math.round((Date.now() - planT) / 60000)) : 0;
+            const drift = plan && planPx && price ? ((price - planPx) / planPx) * 100 : 0;
+            const biasCol = !plan ? C.dim : plan.bias === "bullish" ? C.up : plan.bias === "bearish" ? C.down : C.amber;
+            const L = (v) => (v == null ? "—" : "$" + fp(v));
+            const sBtn = { background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, height: 28, padding: "0 9px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", touchAction: "manipulation" };
+            return (
+              <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
+                  <span style={{ fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO, whiteSpace: "nowrap" }}>AI trade plan</span>
+                  {plan && <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim, whiteSpace: "nowrap" }}>{ageMin < 1 ? "just now" : `${ageMin}m ago`}</span>}
+                  <div style={{ flex: 1 }} />
+                  {plan && <button onClick={() => setPlanLines((v) => !v)} aria-label="toggle plan levels on chart" style={{ ...sBtn, color: planLines ? C.amber : C.muted, borderColor: planLines ? C.amber + "66" : C.border }}>levels {planLines ? "on" : "off"}</button>}
+                  {plan && <button onClick={copyPlan} aria-label="copy plan" style={sBtn}><CopyIcon /></button>}
+                  <button onClick={() => analyze(!!plan)} disabled={planBusy} aria-label={plan ? "refresh plan" : "analyze"}
+                    style={{ ...sBtn, background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, fontWeight: 700, opacity: planBusy ? 0.6 : 1 }}>
+                    {planBusy ? "Analyzing…" : plan ? "↻ Refresh" : "✦ Analyze"}
+                  </button>
+                </div>
+                {!plan && !planBusy && !planErr && (
+                  <div style={{ padding: "10px 12px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
+                    Support and resistance from today's tape, plus three long-only ways to trade it. Nothing is sent until you tap Analyze.
+                  </div>
+                )}
+                {planBusy && !plan && <div style={{ padding: "10px 12px", color: C.amber, fontSize: 11, fontFamily: MONO }}>Reading the tape — this takes a few seconds…</div>}
+                {planErr && <div style={{ padding: "8px 12px", color: C.down, fontSize: 11, fontFamily: MONO }}>✕ {planErr}</div>}
+                {plan && (
+                  <>
+                    {Math.abs(drift) >= 8 && (
+                      <div style={{ padding: "6px 12px", background: C.amber + "12", color: C.amber, fontSize: 10, fontFamily: MONO, borderBottom: `1px solid ${C.border}` }}>
+                        price has moved {drift >= 0 ? "+" : ""}{drift.toFixed(1)}% since this plan — refresh before acting on it
+                      </div>
+                    )}
+                    <div style={{ padding: "10px 12px 6px", display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: biasCol, border: `1px solid ${biasCol}66`, borderRadius: 4, padding: "2px 6px", flexShrink: 0, textTransform: "uppercase" }}>{plan.bias}</span>
+                      <div style={{ fontSize: 12, lineHeight: 1.5, color: C.text }}>{plan.summary}</div>
+                    </div>
+                    <div style={{ padding: "4px 12px 2px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>Levels · tap one to set a price alert</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "4px 12px 10px" }}>
+                      {[...plan.levels].reverse().map((l, i) => (
+                        <button key={i} onClick={() => { if (onSetLevels) { onSetLevels(symbol, [...new Set([...((prefs && prefs.lv) || []), +l.price.toFixed(4)])].sort((a, b) => a - b).slice(0, 15)); say(`Alert at $${fp(l.price)} set`); } }}
+                          title={l.label}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, background: (l.kind === "support" ? C.up : C.down) + "12", border: `1px solid ${(l.kind === "support" ? C.up : C.down)}55`, borderRadius: 6, padding: "5px 8px", fontFamily: MONO, fontSize: 10, color: l.kind === "support" ? C.up : C.down, cursor: "pointer", touchAction: "manipulation" }}>
+                          <span style={{ fontWeight: 800 }}>{l.kind === "support" ? "S" : "R"} ${fp(l.price)}</span>
+                          <span style={{ color: C.muted, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.label}</span>
+                          <span style={{ color: C.dim, letterSpacing: 1 }}>{"●".repeat(l.strength)}{"○".repeat(3 - l.strength)}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {(plan.must_hold != null || plan.must_fail != null) && (
+                      <div style={{ display: "flex", gap: 14, padding: "0 12px 10px", fontFamily: MONO, fontSize: 10 }}>
+                        <span><span style={{ color: C.dim }}>MUST HOLD </span><span style={{ color: C.up, fontWeight: 800 }}>{L(plan.must_hold)}</span></span>
+                        <span><span style={{ color: C.dim }}>MUST FAIL </span><span style={{ color: C.down, fontWeight: 800 }}>{L(plan.must_fail)}</span></span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "repeat(3, 1fr)", gap: 8, padding: "0 12px 10px" }}>
+                      {plan.scenarios.map((sc) => (
+                        <div key={sc.name} style={{ background: C.panel2, border: `1px solid ${sc.stance === "long" ? C.up + "33" : C.border}`, borderRadius: 8, padding: "9px 10px", display: "flex", flexDirection: "column", gap: 5 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 800 }}>{sc.name}</span>
+                            <span style={{ fontFamily: MONO, fontSize: 8, fontWeight: 800, color: sc.stance === "long" ? C.up : C.dim, background: (sc.stance === "long" ? C.up : C.dim) + "1C", borderRadius: 3, padding: "1px 5px" }}>{sc.stance === "long" ? "LONG" : "WAIT"}</span>
+                          </div>
+                          <div style={{ fontSize: 11, color: C.text, lineHeight: 1.45 }}>{sc.trigger}</div>
+                          {sc.stance === "long" && (
+                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", fontFamily: MONO, fontSize: 10 }}>
+                              <span style={{ color: C.dim }}>ENTRY</span><span style={{ color: C.text }}>{sc.entry_lo != null ? `${L(sc.entry_lo)} – ${L(sc.entry_hi)}` : "—"}</span>
+                              <span style={{ color: C.dim }}>STOP</span><span style={{ color: C.down, fontWeight: 700 }}>{L(sc.stop)}</span>
+                              <span style={{ color: C.dim }}>TARGETS</span><span style={{ color: C.up, fontWeight: 700 }}>{sc.targets.length ? sc.targets.map(L).join(" → ") : "—"}</span>
+                            </div>
+                          )}
+                          {sc.invalidation && <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.4 }}><span style={{ color: C.down, fontFamily: MONO, fontSize: 8, letterSpacing: 1 }}>INVALID IF </span>{sc.invalidation}</div>}
+                          {sc.note && <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.4 }}>{sc.note}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    {plan.risk_notes && <div style={{ padding: "0 12px 8px", fontSize: 10, color: C.muted, lineHeight: 1.45 }}>{plan.risk_notes}</div>}
+                    <div style={{ padding: "6px 12px 10px", borderTop: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>
+                      AI-generated · not financial advice · built {ftime(planT)} ET at ${fp(planPx)} · {plan.model || "model"}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {/* confluence tracker */}
           <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -1805,6 +1945,11 @@ export default function App() {
   const [pushArmed, setPushArmed] = useState(false);
   const [alertLog, setAlertLog] = useState([]);
   const [alertCenter, setAlertCenter] = useState(false);
+  const [jStats, setJStats] = useState(null); // push follow-through from the server journal
+  useEffect(() => {
+    if (!alertCenter) return;
+    fetch("/journal").then((r) => r.json()).then((j) => setJStats(j && j.stats ? j.stats : null)).catch(() => {});
+  }, [alertCenter]);
   const [bannerX, setBannerX] = useState(0);
   const bannerTouchRef = useRef(null);
   const [pushWarn, setPushWarn] = useState(false);
@@ -2948,6 +3093,11 @@ export default function App() {
               <button onClick={() => setAlertLog([])} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "5px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>Clear all</button>
               <button onClick={() => setAlertCenter(false)} style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "5px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Close</button>
             </div>
+            <div style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
+              {jStats && jStats.n > 0
+                ? <>PUSH FOLLOW-THROUGH · 20D · {jStats.n} pushes · <span style={{ color: jStats.green15 >= 50 ? C.up : C.down }}>{Math.round(jStats.green15)}% green at 15m</span> · avg {jStats.avg15 >= 0 ? "+" : ""}{jStats.avg15.toFixed(1)}% at 15m{jStats.avgMaxUp30 != null ? <> · avg peak +{jStats.avgMaxUp30.toFixed(1)}% within 30m</> : null}</>
+                : <>PUSH FOLLOW-THROUGH · builds after the first confluence pushes land (5 / 15 / 30-minute prices are journaled for every push)</>}
+            </div>
             <div style={{ overflowY: "auto", flex: 1 }}>
               {alertLog.length === 0 && <div style={{ padding: 20, color: C.dim, fontFamily: MONO, fontSize: 12 }}>No alerts yet today.</div>}
               {alertLog.map((a, i) => (
@@ -3033,6 +3183,7 @@ export default function App() {
           symbol={sel.symbol}
           keys={keys}
           feed={feed}
+          plans={!!(srvCfg && srvCfg.plans)}
           g={sel}
           pm={pmMap[sel.symbol]}
           news={newsMap[sel.symbol]}
