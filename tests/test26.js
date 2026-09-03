@@ -38,6 +38,21 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.route('**/float/**', (r) => r.fulfill({ json: { float: null } }));
   await page.route('**/push/**', (r) => r.fulfill({ json: { ok: true, key: 'x' } }));
   await page.route('**/settings', (r) => r.fulfill({ json: {} }));
+  await page.route('**/config', (r) => r.fulfill({ json: { serverKeys: false, invite: false, feed: 'sip', plans: true, planModel: 'claude-opus-5' } }));
+  let planReq = null;
+  await page.route('**/plan', (r) => {
+    planReq = JSON.parse(r.request().postData() || '{}');
+    r.fulfill({ json: { cached: false, t: Date.now(), plan: {
+      bias: 'bullish', summary: 'Holding VWAP with a rising tape; the dip to 1.24 is the trade.',
+      levels: [{ price: 1.15, kind: 'support', label: 'VWAP', strength: 2 }, { price: 1.24, kind: 'support', label: 'EMA 8', strength: 3 }, { price: 1.50, kind: 'resistance', label: 'PMH', strength: 2 }],
+      scenarios: [
+        { name: 'Long continuation', stance: 'long', trigger: 'hold 1.24 and push through 1.31', entry_lo: 1.25, entry_hi: 1.28, stop: 1.19, targets: [1.34, 1.50], invalidation: 'loses 1.19 on a 1-min close', note: 'partials at T1' },
+        { name: 'Dip buy', stance: 'long', trigger: 'pullback to VWAP that holds', entry_lo: 1.15, entry_hi: 1.18, stop: 1.10, targets: [1.28], invalidation: 'no bounce inside 3 bars', note: '' },
+        { name: 'Stand aside', stance: 'wait', trigger: 'below 1.10 there is no long', entry_lo: 0, entry_hi: 0, stop: 0, targets: [], invalidation: '', note: 'reclaim of 1.15 reopens the dip buy' },
+      ],
+      must_hold: 1.19, must_fail: 1.10, risk_notes: 'Size small; halts likely above 1.50.', model: 'claude-opus-5',
+    } } });
+  });
   const reqs = [];
   page.on('request', (r) => { if (r.url().includes('localhost')) reqs.push(r.url().replace('http://localhost:8787','').slice(0,80)); });
   await page.goto('http://localhost:8787/', { waitUntil: 'domcontentloaded' });
@@ -137,6 +152,22 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.waitForTimeout(500);
   const toast = await page.evaluate(() => { const t = document.querySelector('[role="status"]'); return t ? t.textContent : null; });
   console.log(toast && /Copied|Copy|copy/.test(toast) ? `✓ Copy reports its outcome in a bottom toast (${JSON.stringify(toast)})` : '✗ no toast after Copy: ' + JSON.stringify(toast));
+  // AI trade plan card: idle → Analyze → levels, three scenarios, must-hold / must-fail, disclaimer
+  const bP = await page.textContent('#root');
+  console.log(bP.includes('AI trade plan') && bP.includes('Nothing is sent until you tap Analyze') ? '✓ AI plan card is idle until asked (nothing sent on open)' : '✗ plan card missing or eager');
+  await page.click('button[aria-label="analyze"]');
+  await page.waitForTimeout(600);
+  const bQ = await page.textContent('#root');
+  console.log(planReq && planReq.symbol === 'GOODA' && planReq.fresh === false ? '✓ Analyze posts the symbol to /plan' : '✗ plan request wrong: ' + JSON.stringify(planReq));
+  console.log(bQ.includes('Long continuation') && bQ.includes('Dip buy') && bQ.includes('Stand aside') && bQ.includes('MUST HOLD') && bQ.includes('$1.19') ? '✓ plan renders three scenarios with must-hold / must-fail' : '✗ plan scenarios missing');
+  console.log(bQ.includes('S $1.24') && bQ.includes('R $1.50') && bQ.includes('EMA 8') ? '✓ support / resistance chips render with their anchors' : '✗ level chips missing');
+  console.log(bQ.includes('BULLISH') && bQ.includes('not financial advice') && bQ.includes('claude-opus-5') ? '✓ bias pill, disclaimer and serving model shown' : '✗ plan footer missing');
+  await page.click('button[title="EMA 8"]');
+  await page.waitForTimeout(300);
+  const prefsL = await page.evaluate(() => JSON.parse(localStorage.getItem('alert-prefs') || '{}'));
+  console.log(prefsL.GOODA && prefsL.GOODA.lv && prefsL.GOODA.lv.includes(1.24) ? '✓ tapping a level chip sets a price-cross alert at that level' : '✗ level → alert failed: ' + JSON.stringify(prefsL));
+  const lvlBtn = await page.evaluate(() => { const b = document.querySelector('button[aria-label="toggle plan levels on chart"]'); return b ? b.textContent : null; });
+  console.log(lvlBtn && /levels on/.test(lvlBtn) ? '✓ plan levels are drawn on the chart by default (toggle present)' : '✗ levels toggle missing: ' + lvlBtn);
   // add a price-cross level
   await page.click('button[aria-label="replay"]');
   await page.waitForTimeout(400);
