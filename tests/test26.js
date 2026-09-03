@@ -90,6 +90,13 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   console.log(b1.includes('Confluence tracker') ? '✓ tapping a row opens the Advanced view directly' : '✗ Advanced view did not open');
   console.log(b1.includes('⟲') ? '✓ icon-only fit-all control present' : '✗ fit-all control missing');
   console.log(b1.includes('LULD') ? '✓ estimated LULD halt bands shown in the stats strip' : '✗ LULD estimate missing');
+  await page.waitForSelector('text=Best bid', { timeout: 8000 });
+  const l2 = await page.evaluate(() => {
+    const root = document.querySelector('#root').textContent;
+    const cv = [...document.querySelectorAll('canvas')].find(c => c.clientHeight === 120);
+    return { hdr: root.includes('Level 2') && root.includes('Best bid') && root.includes('Best ask'), bid: root.includes('$1.41'), ask: root.includes('$1.43'), ladder: root.includes('Row 1 = live NBBO'), chart: !!cv && cv.width > 0 };
+  });
+  console.log(l2.hdr && l2.bid && l2.ask && l2.ladder && l2.chart ? '✓ Level 2: best bid/ask block, depth chart, and Size·Bid·Ask·Size ladder from the NBBO' : '✗ Level 2 panel wrong: ' + JSON.stringify(l2));
   const replayBtn = await page.evaluate(() => { const b = document.querySelector('button[aria-label="replay"]'); return b ? b.textContent.trim() : null; });
   console.log(replayBtn === '▶' ? '✓ icon-only replay control sits in the view-controls row' : '✗ replay control wrong: ' + JSON.stringify(replayBtn));
   // the four top bars must never spill past the phone's edge — and the price line is ONE line
