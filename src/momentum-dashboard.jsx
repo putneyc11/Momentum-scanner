@@ -963,6 +963,141 @@ const WINS = [
 const WIN_TF = { "1D": null, "5D": "15Min", "1M": "1Hour", "3M": "1Hour", "6M": "1Day", "1Y": "1Day", "5Y": "1Day" };
 const MAX_BARS = 2000;
 
+/* ---------------- Level 2 ----------------
+   Best bid / best ask up top, a depth chart, and a ladder. Alpaca's stock
+   feed carries the NBBO top of book, not resting depth, so the ladder's
+   first row is the live quote and every row below it is the TRADED depth:
+   shares that actually printed at each price in the last 15 minutes. The
+   chart stacks the same thing outward from the spread. Labeled as such. */
+const fmtInt = (n) => Math.round(n || 0).toLocaleString("en-US");
+function tradedDepth(prints, quote) {
+  const now = Date.now();
+  const bins = new Map();
+  for (const t of prints || []) {
+    if (now - t.t > 15 * 60000 || !(t.p > 0)) continue;
+    const k = Math.round(t.p * 100) / 100;
+    bins.set(k, (bins.get(k) || 0) + t.s);
+  }
+  const bp = quote ? quote.bp : null, ap = quote ? quote.ap : null;
+  const mid = bp && ap ? (bp + ap) / 2 : null;
+  const bids = [], asks = [];
+  for (const [p, sz] of bins) {
+    /* rows beyond the NBBO only: prints AT the bid/ask belong to row 1,
+       prints inside the spread belong to neither side */
+    if (mid == null) continue;
+    if (p < bp) bids.push({ p, s: sz });
+    else if (p > ap) asks.push({ p, s: sz });
+  }
+  bids.sort((a, b) => b.p - a.p);
+  asks.sort((a, b) => a.p - b.p);
+  return { bids, asks, mid };
+}
+function Level2({ quote, prints }) {
+  const ref = useRef(null);
+  const depth = useMemo(() => tradedDepth(prints, quote), [prints, quote]);
+  const bs = quote ? (quote.bs || 0) * 100 : 0, as = quote ? (quote.as || 0) * 100 : 0;
+  const spr = quote ? quote.ap - quote.bp : null;
+  const sprPct = spr != null && depth.mid ? (spr / depth.mid) * 100 : null;
+  const bidRows = quote ? [{ p: quote.bp, s: bs, live: true }, ...depth.bids.slice(0, 4)] : [];
+  const askRows = quote ? [{ p: quote.ap, s: as, live: true }, ...depth.asks.slice(0, 4)] : [];
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv || !quote) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    if (!W || !H) return;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const padB = 18, top = 6;
+    /* cumulative from the spread outward; the NBBO size is the first step */
+    const cum = (rows, first) => { let a = first; return rows.map((r) => ({ p: r.p, c: (a += r.s) })); };
+    const bidC = cum(depth.bids, bs), askC = cum(depth.asks, as);
+    const lo = bidC.length ? bidC[bidC.length - 1].p : quote.bp, hi = askC.length ? askC[askC.length - 1].p : quote.ap;
+    const half = Math.max(depth.mid - lo, hi - depth.mid, depth.mid * 0.004);
+    const x0 = depth.mid - half, x1 = depth.mid + half;
+    const X = (p) => ((p - x0) / (x1 - x0)) * W;
+    const maxC = Math.max(bs, as, ...bidC.map((r) => r.c), ...askC.map((r) => r.c), 1);
+    const Y = (c) => top + (H - padB - top) * (1 - c / maxC);
+    const dots = (col) => {
+      const pc = document.createElement("canvas"); pc.width = pc.height = 6;
+      const g = pc.getContext("2d"); g.fillStyle = col; g.globalAlpha = 0.55; g.beginPath(); g.arc(3, 3, 1.2, 0, Math.PI * 2); g.fill();
+      return ctx.createPattern(pc, "repeat");
+    };
+    const side = (rows, first, startP, dir, col) => {
+      /* dir -1 = bids march left, +1 = asks march right */
+      const pts = [[X(startP), Y(first)]];
+      let c = first, p = startP;
+      for (const r of rows) { pts.push([X(r.p), Y(c)]); c += r.s; pts.push([X(r.p), Y(c)]); p = r.p; }
+      const edge = dir < 0 ? 0 : W;
+      pts.push([edge, Y(c)]);
+      ctx.beginPath(); ctx.moveTo(pts[0][0], H - padB);
+      for (const [x, y] of pts) ctx.lineTo(x, y);
+      ctx.lineTo(edge, H - padB); ctx.closePath();
+      ctx.fillStyle = col + "22"; ctx.fill();
+      ctx.fillStyle = dots(col); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(pts[0][0], H - padB);
+      for (const [x, y] of pts) ctx.lineTo(x, y);
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+    };
+    side(depth.bids, bs, quote.bp, -1, C.up);
+    side(depth.asks, as, quote.ap, +1, C.down);
+    ctx.strokeStyle = C.border; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, H - padB + 0.5); ctx.lineTo(W, H - padB + 0.5); ctx.stroke();
+    ctx.font = `10px ${MONO}`; ctx.fillStyle = C.dim; ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left"; ctx.fillText("$" + fp(x0), 4, H - 5);
+    ctx.textAlign = "center"; ctx.fillText("$" + fp(depth.mid), W / 2, H - 5);
+    ctx.textAlign = "right"; ctx.fillText("$" + fp(x1), W - 4, H - 5);
+  }, [quote, depth, bs, as]);
+  const Row = ({ b, a, i }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", padding: "6px 12px", fontFamily: MONO, fontSize: 12, background: i === 0 ? C.panel2 : "transparent", borderBottom: `1px solid ${C.border}44` }}>
+      <span style={{ color: C.text, textAlign: "left" }}>{b ? fmtInt(b.s) : ""}</span>
+      <span style={{ color: C.up, textAlign: "right", paddingRight: 10, borderRight: `1px dotted ${C.border}` }}>{b ? "$" + fp(b.p) : ""}</span>
+      <span style={{ color: C.down, textAlign: "left", paddingLeft: 10 }}>{a ? "$" + fp(a.p) : ""}</span>
+      <span style={{ color: C.text, textAlign: "right" }}>{a ? fmtInt(a.s) : ""}</span>
+    </div>
+  );
+  const nRows = Math.max(bidRows.length, askRows.length);
+  return (
+    <div style={{ borderBottom: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px 0" }}>
+        <span style={{ fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Level 2</span>
+        <span style={{ fontSize: 9, color: C.dim, fontFamily: MONO }}>NBBO · traded depth 15m</span>
+        <div style={{ flex: 1 }} />
+        {sprPct != null && (
+          <span style={{ fontFamily: MONO, fontSize: 9, color: sprPct < 0.3 ? C.up : sprPct < 1 ? C.amber : C.down }}>spread ${spr.toFixed(2)} · {sprPct.toFixed(2)}%</span>
+        )}
+      </div>
+      {!quote && <div style={{ padding: "10px 12px 12px", color: C.dim, fontSize: 11 }}>Waiting for a quote…</div>}
+      {quote && (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "8px 12px 4px" }}>
+            <div>
+              <div style={{ fontSize: 10, color: C.dim }}>Best bid</div>
+              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.up, lineHeight: 1.1 }}>${fp(quote.bp)}</div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>× {fmtInt(bs)}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: C.dim }}>Best ask</div>
+              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.down, lineHeight: 1.1 }}>${fp(quote.ap)}</div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>{fmtInt(as)} ×</div>
+            </div>
+          </div>
+          <canvas ref={ref} style={{ display: "block", width: "100%", height: 120 }} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", padding: "8px 12px 4px", fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderTop: `1px solid ${C.border}` }}>
+            <span>Size</span><span style={{ textAlign: "right", paddingRight: 10 }}>Bid</span><span style={{ paddingLeft: 10 }}>Ask</span><span style={{ textAlign: "right" }}>Size</span>
+          </div>
+          {Array.from({ length: nRows }, (_, i) => <Row key={i} i={i} b={bidRows[i]} a={askRows[i]} />)}
+          <div style={{ padding: "6px 12px 8px", fontSize: 9, color: C.dim, fontFamily: MONO }}>
+            Row 1 = live NBBO · rows below = shares printed at that price, last 15 min
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* Chart chrome lives at MODULE scope on purpose. Defined inside the chart's
    render these were new component types on every data tick, so React
    remounted the buttons under the user's finger — a tap that began on the
@@ -1026,6 +1161,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
 
   const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
   const [alertsOpen, setAlertsOpen] = useState(false); // per-ticker alert sheet (bell in the header)
+  const printsRef = useRef([]);                        // last ~15 min of prints — feeds the Level 2 traded depth
   /* AI trade plan: levels + three long-only scenarios, built server-side from the tape */
   const [plan, setPlan] = useState(null);
   const [planT, setPlanT] = useState(0);
@@ -1114,7 +1250,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   useEffect(() => {
     let poll = null, dead = false;
     tradesSeenRef.current = 0; lastTradeMsRef.current = 0; tradeTimesRef.current = [];
-    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]);
+    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]); printsRef.current = [];
     const haltId = setInterval(() => {
       const lastT = lastTradeMsRef.current;
       const preRate = tradeTimesRef.current.filter((t) => t >= lastT - 30000 && t <= lastT).length;
@@ -1132,6 +1268,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
         if (onAlert) onAlert(`▶ ${symbol} prints resumed`, "Tape is moving again after the stall");
       }
       setTicks((prev) => [{ p, s, t }, ...prev].slice(0, 40));
+      printsRef.current = [{ p, s, t }, ...printsRef.current].slice(0, 800);
       if (s >= BIG_PRINT) setBigTicks((prev) => [{ p, s, t }, ...prev].slice(0, 80));
       if (feedMode(feed).delayMs) return;
       setBars((prev) => {
@@ -1511,18 +1648,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
 
   const sidebar = (
     <>
-      {quote && (
-        <div style={{ padding: "6px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 11 }}>
-          <div style={{ fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 3 }}>Book · NBBO top of book</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ color: C.up }}>BID {fp(quote.bp)}<span style={{ color: C.dim }}> ×{(quote.bs || 0) * 100}</span></span>
-            <span style={{ color: C.down }}>ASK {fp(quote.ap)}<span style={{ color: C.dim }}> ×{(quote.as || 0) * 100}</span></span>
-            <span style={{ color: sprPct == null ? C.dim : sprPct < 0.3 ? C.up : sprPct < 1 ? C.amber : C.down }}>
-              SPR {spr != null ? fp(spr) : "—"}{sprPct != null ? ` (${sprPct.toFixed(2)}%)` : ""}
-            </span>
-          </div>
-        </div>
-      )}
+      <Level2 quote={quote} prints={printsRef.current} />
       <div style={{ padding: "8px 12px", fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 8 }}>
         <span>Time & sales</span>
         <span style={{ color: C.amber, textTransform: "none" }}>■ {fv(BIG_PRINT)}+ prints</span>
