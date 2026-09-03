@@ -506,7 +506,7 @@ function Spark({ bars, up, h, fill }) {
      and clipped its padding entirely. marginRight keeps a real gap between
      the end of the line and the row edge at every width. */
   return <canvas ref={ref} style={{
-    ...(fill ? { flex: "0 1 72px", minWidth: 16, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
+    ...(fill ? { flex: "0 1 72px", minWidth: 30, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
     height: h || 24, display: "block", marginRight: fill ? 0 : 10,
   }} />;
 }
@@ -567,16 +567,17 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
      NEVER overflows — overflow is what used to jam the spark flush against
      the row edge with zero padding. The chevron is desktop-only (on phones
      it was always clipped anyway, and the whole row is tappable). */
-  const w = fill ? { tick: 50, price: 52, pct: 62, vol: 42 } : { tick: 54, price: 56, pct: 66, vol: 48 };
+  const w = fill ? { tick: 46, price: 50, pct: 58, vol: 40 } : { tick: 54, price: 56, pct: 66, vol: 48 };
   return (
     <div
       onClick={() => onOpen(g.symbol)}
-      style={{ display: "flex", alignItems: "center", gap: fill ? 6 : 10, padding: "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
+      className="noscrollbar"
+      style={{ display: "flex", alignItems: "center", gap: fill ? 3 : 10, padding: fill ? "9px 10px" : "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", overflowX: "auto", WebkitOverflowScrolling: "touch", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
     >
-      <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: "2px 6px", minWidth: 40, textAlign: "center", flexShrink: 0 }}>
+      <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: fill ? "2px 5px" : "2px 6px", minWidth: fill ? 34 : 40, textAlign: "center", flexShrink: 0 }}>
         {g.grade} {g.score}
       </span>
-      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexShrink: 0 }}>
         {g.symbol}
         {halted && (
           <span style={{ color: C.down, fontSize: 10, fontFamily: MONO }}>
@@ -584,16 +585,9 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           </span>
         )}
         {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10 }}>⚠</span>}
-        {news && (
-          /* catalyst attached — full headline lives in the Advanced view */
-          <span title={news.headline} style={{ color: news.dilution ? C.down : C.dim, display: "inline-flex", alignItems: "center", gap: 2 }}>
-            <NewsIcon />
-            {news.dilution && <span style={{ fontSize: 8, fontWeight: 800 }}>dil</span>}
-          </span>
-        )}
       </span>
-      <span style={{ fontFamily: MONO, fontSize: 13, minWidth: w.price }}>{fp(g.price)}</span>
-      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down, minWidth: w.pct }}>
+      <span style={{ fontFamily: MONO, fontSize: 13, minWidth: w.price, flexShrink: 0 }}>{fp(g.price)}</span>
+      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down, minWidth: w.pct, flexShrink: 0 }}>
         {fpct(g.pct)}
         {ah && !fill && <span style={{ display: "block", fontSize: 9, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>{`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}</span>}
       </span>
@@ -604,7 +598,7 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           {`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}
         </span>
       )}
-      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>
+      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol, flexShrink: 0 }}>
         {fv(g.dayVol)}
         {g.rotation != null && g.rotation >= 0.5 && (
           /* float rotation: cumulative volume ÷ float — the gap trader's #1 stat */
@@ -622,8 +616,16 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
           aria-label={muted ? "unmute alerts for this stock" : "mute alerts for this stock"}
           title={muted ? "alerts muted for this stock — tap to unmute" : "alerts on for this stock — tap to mute"}
-          style={{ display: "flex", alignItems: "center", alignSelf: "stretch", padding: "0 7px", color: muted ? C.dim : C.muted, opacity: muted ? 0.55 : 1, cursor: "pointer", flexShrink: 0 }}>
+          style={{ display: "flex", alignItems: "center", alignSelf: "stretch", padding: "0 5px", color: muted ? C.dim : C.muted, opacity: muted ? 0.55 : 1, cursor: "pointer", flexShrink: 0 }}>
           <BellIcon muted={muted} />
+        </span>
+      )}
+      {news && (
+        /* catalyst attached — sits at the END of the row (scroll to it on a
+           phone); the full headline lives in the Advanced view */
+        <span title={news.headline} style={{ display: "inline-flex", alignItems: "center", gap: 3, color: news.dilution ? C.down : C.dim, flexShrink: 0, paddingRight: 2 }}>
+          <NewsIcon />
+          {news.dilution && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 0.5 }}>DIL</span>}
         </span>
       )}
       {!fill && <span style={{ color: C.dim }}>›</span>}
