@@ -3171,26 +3171,26 @@ export default function App() {
             : `≤$${maxPrice} · ≥${fv(minDayVol)} vol · ≥25% day · ${found} movers`} · {feedMode(feed).short} · {updated ? `upd ${ftime(updated)} ET` : "loading…"}
         </span>
         <button onClick={toggleAlerts} aria-label={alertsOn ? "alerts on — tap to switch off" : "alerts off — tap to switch on"}
-          style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO, display: "flex", alignItems: "center", gap: 6 }}>
+          style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 8, height: 44, padding: "0 14px", cursor: "pointer", fontSize: 12, fontFamily: MONO, display: "flex", alignItems: "center", gap: 6, touchAction: "manipulation" }}>
           <BellIcon muted={!alertsOn} /> {alertsOn ? (pushArmed ? "Lock-screen" : "On") : "Off"}
         </button>
         <button onClick={() => setAlertCenter(true)}
           aria-label={jHit == null ? "push follow-through: no pushes recorded yet" : `push follow-through: ${jHit}% green 15 minutes after the push, ${jStats.n} pushes over 20 days`}
           title="how the last 20 days of pushes actually followed through"
-          style={{ background: "transparent", border: `1px solid ${jThin ? C.border : jHitCol + "55"}`, color: C.dim, borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontFamily: MONO, fontSize: 12, lineHeight: "15px", display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+          style={{ background: "transparent", border: `1px solid ${jThin ? C.border : jHitCol + "55"}`, color: C.dim, borderRadius: 8, height: 44, padding: "0 12px", cursor: "pointer", fontFamily: MONO, fontSize: 12, display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap", touchAction: "manipulation" }}>
           <span style={{ fontSize: 9, letterSpacing: 1.2 }}>HIT</span>
           <span style={{ fontWeight: 800, color: jHit == null ? C.dim : jHitCol }}>{jHit == null ? "—" : jHit + "%"}</span>
         </button>
         <button onClick={openHelp} aria-label="watch the feature walkthrough" title="feature walkthrough"
-          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, height: 44, minWidth: 44, padding: 0, cursor: "pointer", fontSize: 13, fontFamily: MONO, display: "grid", placeItems: "center", touchAction: "manipulation" }}>
           ?
         </button>
         <button onClick={() => setAboutOpen(true)} aria-label="how this works and disclosures" title="how this works"
-          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, height: 44, minWidth: 44, padding: 0, cursor: "pointer", fontSize: 13, fontFamily: MONO, display: "grid", placeItems: "center", touchAction: "manipulation" }}>
           ⓘ
         </button>
         <button onClick={() => setRunning(false)}
-          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>
+          style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, height: 44, padding: "0 14px", cursor: "pointer", fontSize: 13, touchAction: "manipulation" }}>
           Settings
         </button>
       </div>
