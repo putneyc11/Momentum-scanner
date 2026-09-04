@@ -110,12 +110,10 @@ In the left tree click **App** (blue icon) → target **App**:
    watchlist loads. Turn the bell on → iOS asks for notification permission →
    allow. The banner should say "Lock-screen alerts armed".
 3. Check the Render log: `push registered for device — devices with push: 1`.
-4. Lock the phone and wait for a real alert during market hours, or test
-   without the market: Xcode → Debug → Simulate… is not available for APNs on
-   device, so use the server's own path: from a terminal
-   `curl -X POST https://momentum-scanner.onrender.com/push/test` is **not** a
-   route; instead temporarily set `LEGACY_PUSH=1` on Render during a live
-   session so the first single trigger pushes, then remove it.
+4. Lock the phone and wait for a real alert during market hours. To force one
+   without waiting for confluence, temporarily set `LEGACY_PUSH=1` on Render
+   during a live session (every single trigger then pushes), watch one land,
+   and remove it again.
 
 While running from Xcode the token is a **sandbox** token — `APNS_SANDBOX=1`
 must be set on Render for these pushes to deliver. Remove it again in step 6.
