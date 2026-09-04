@@ -1,0 +1,21 @@
+{
+  "appId": "com.momentumscanner.app",
+  "appName": "Momentum Scanner",
+  "webDir": "www",
+  "backgroundColor": "#0A0E13",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0A0E13",
+    "preferredContentMode": "mobile",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "server": {
+    "url": "https://momentum-scanner.onrender.com",
+    "allowNavigation": ["momentum-scanner.onrender.com", "*.onrender.com"]
+  },
+  "plugins": {
+    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] },
+    "SplashScreen": { "launchShowDuration": 800, "launchAutoHide": true, "backgroundColor": "#0A0E13", "showSpinner": false },
+    "StatusBar": { "style": "DARK", "backgroundColor": "#0A0E13", "overlaysWebView": true }
+  }
+}

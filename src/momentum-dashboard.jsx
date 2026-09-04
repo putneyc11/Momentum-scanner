@@ -284,6 +284,27 @@ const gradeColor = (gr) => (gr === "A" ? C.up : gr === "B" ? C.amber : gr === "C
 /* stable anonymous device identity — the server-keys proxy gate and the
    per-device watchlist/push routing key off this */
 const DEVICE = { id: "" };
+/* App Store build: the same bundle runs inside a Capacitor WKWebView. There,
+   sign-in providers and billing must be real (StoreKit / Sign in with Apple)
+   and Web Push does not exist, so the shell hands us an APNs token instead. */
+const NATIVE = () => { try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); } catch (e) { return false; } };
+const capPlugin = (name) => { try { return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null; } catch (e) { return null; } };
+/* ask iOS for notification permission and an APNs token; null when refused */
+async function nativePushToken() {
+  const PN = capPlugin("PushNotifications");
+  if (!PN) return null;
+  let perm = await PN.checkPermissions();
+  if (perm.receive === "prompt" || perm.receive === "prompt-with-rationale") perm = await PN.requestPermissions();
+  if (perm.receive !== "granted") return null;
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    PN.addListener("registration", (t) => fin(t && t.value ? String(t.value) : null));
+    PN.addListener("registrationError", () => fin(null));
+    setTimeout(() => fin(null), 10000);
+    PN.register().catch(() => fin(null));
+  });
+}
 async function req(base, path, params, keys) {
   const qs = new URLSearchParams(params).toString();
   const r = await fetch(`${base}${path}${qs ? "?" + qs : ""}`, {
@@ -844,6 +865,10 @@ const acctLabel = (a) => !a ? "" : a.provider === "apple" ? "Apple ID" : a.provi
 
 function AccountFlow({ onDone, onSkip }) {
   const [step, setStep] = useState("signup"); // signup | email | plan
+  /* App Store build: no simulated providers or pretend billing on the review
+     path — email sign-in and the Free plan only until StoreKit + Sign in with
+     Apple are wired (guidelines 3.1.1 / 4.8) */
+  const store = NATIVE();
   const [email, setEmail] = useState("");
   const [acct, setAcct] = useState(null);
   const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
@@ -872,11 +897,12 @@ function AccountFlow({ onDone, onSkip }) {
         <div style={{ ...col, flex: 1, justifyContent: "center" }}>
           <h1 style={{ fontSize: 27, lineHeight: 1.16, fontWeight: 800, margin: 0 }}>Create your account</h1>
           <p style={{ color: C.muted, fontSize: 14, lineHeight: 1.55, margin: "0 0 8px" }}>Your watchlist, alert rules and plan follow you to every device you sign in on.</p>
-          <button onClick={() => signIn("apple")} style={big({ background: "#FFFFFF", color: "#000", border: "none" })}><AppleMark /> Continue with Apple</button>
-          <button onClick={() => signIn("google")} style={big({ background: "#FFFFFF", color: "#1F1F1F", border: "none" })}><GoogleMark /> Continue with Google</button>
-          <button onClick={() => setStep("email")} style={big({ background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>✉ Continue with email</button>
+          {!store && <button onClick={() => signIn("apple")} style={big({ background: "#FFFFFF", color: "#000", border: "none" })}><AppleMark /> Continue with Apple</button>}
+          {!store && <button onClick={() => signIn("google")} style={big({ background: "#FFFFFF", color: "#1F1F1F", border: "none" })}><GoogleMark /> Continue with Google</button>}
+          <button onClick={() => setStep("email")} style={big(store ? { background: C.amber, color: "#06090D", border: "none" } : { background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>✉ Continue with email</button>
           <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginTop: 6 }}>
-            Preview build — sign-in is simulated on this device and nothing is sent anywhere. By continuing you agree this is market information, not investment advice.
+            {store ? "By continuing you agree to the " : "Preview build — sign-in is simulated on this device and nothing is sent anywhere. By continuing you agree this is market information, not investment advice. "}
+            {store && <><a href="/terms" target="_blank" rel="noopener" style={{ color: C.muted }}>Terms of Use</a> and <a href="/privacy" target="_blank" rel="noopener" style={{ color: C.muted }}>Privacy Policy</a>. Market information, not investment advice.</>}
           </div>
         </div>
       )}
@@ -901,7 +927,7 @@ function AccountFlow({ onDone, onSkip }) {
             <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.3fr", gap: 8, padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 9, letterSpacing: 1.2, textTransform: "uppercase" }}>
               <span style={{ color: C.dim }}>Feature</span>
               <span style={{ color: C.muted }}>Free</span>
-              <span style={{ color: C.amber }}>Pro · {PRO_PRICE}</span>
+              <span style={{ color: C.amber }}>{store ? "Pro · coming soon" : `Pro · ${PRO_PRICE}`}</span>
             </div>
             {PLAN_ROWS.map(([f, a, b]) => (
               <div key={f} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.3fr", gap: 8, padding: "10px 14px", borderBottom: `1px solid ${C.border}66`, fontSize: 12, lineHeight: 1.4 }}>
@@ -911,12 +937,14 @@ function AccountFlow({ onDone, onSkip }) {
               </div>
             ))}
           </div>
-          <button onClick={() => pick("pro")} style={big({ background: C.amber, color: "#06090D", border: "none", flexDirection: "column", gap: 2 })}>
+          {!store && <button onClick={() => pick("pro")} style={big({ background: C.amber, color: "#06090D", border: "none", flexDirection: "column", gap: 2 })}>
             <span>Start Pro · {PRO_PRICE}</span>
             <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.8 }}>7-day free trial · cancel any time</span>
-          </button>
-          <button onClick={() => pick("free")} style={big({ background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>Continue with Free</button>
-          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5 }}>Preview build — no charge today; billing arrives with the App Store release. Real-time alert pricing is subject to the data plan we finalize with our market-data vendor.</div>
+          </button>}
+          <button onClick={() => pick("free")} style={big(store ? { background: C.amber, color: "#06090D", border: "none" } : { background: "transparent", color: C.text, border: `1px solid ${C.border}` })}>Continue with Free</button>
+          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5 }}>{store
+            ? <>Pro is coming soon as an in-app subscription. Everything shown works on Free today. <a href="/terms" target="_blank" rel="noopener" style={{ color: C.muted }}>Terms of Use</a> · <a href="/privacy" target="_blank" rel="noopener" style={{ color: C.muted }}>Privacy Policy</a></>
+            : "Preview build — no charge today; billing arrives with the App Store release. Real-time alert pricing is subject to the data plan we finalize with our market-data vendor."}</div>
         </div>
       )}
     </div>
@@ -962,6 +990,9 @@ function AboutPage({ onClose }) {
         </S>
         <S title="Not financial advice">
           Nothing in this app is investment advice or a recommendation. Small-cap momentum stocks are extremely volatile; most gappers fade. Scores, bands, and flags are heuristics that can be wrong. Trade at your own risk.
+        </S>
+        <S title="Legal & support">
+          <a href="/terms" target="_blank" rel="noopener" style={{ color: C.amber }}>Terms of Use</a> · <a href="/privacy" target="_blank" rel="noopener" style={{ color: C.amber }}>Privacy Policy</a> · <a href="/support" target="_blank" rel="noopener" style={{ color: C.amber }}>Support</a>
         </S>
       </div>
     </div>
@@ -2150,12 +2181,26 @@ export default function App() {
   const [account, setAccount] = useState(null); // {provider, email, plan, createdAt} — preview: on-device only
   const accountRef = useRef(null);
   const [acctOpen, setAcctOpen] = useState(false);
+  const [acctGone, setAcctGone] = useState(false);
   const saveAccount = useCallback((a) => {
     accountRef.current = a;
     setAccount(a);
+    if (a) setAcctGone(false);
     if (a) { try { window.storage.set("account", JSON.stringify(a)); } catch (e) {} }
     else { try { window.storage.delete("account"); } catch (e) {} }
   }, []);
+  /* App Store rule 5.1.1(v): an app that creates accounts must let the user
+     delete one in-app. Wipes the account, the server's copy, this device's
+     watchlist + push registration, and the local sign-in. */
+  const deleteAccount = useCallback(async () => {
+    if (!window.confirm("Delete your account? Your plan, synced watchlist and alert rules are removed from our server. This cannot be undone.")) return;
+    try {
+      await fetch("/auth/forget", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: DEVICE.id }) });
+    } catch (e) {}
+    saveAccount(null);
+    setAlertsOn(false); setPushArmed(false);
+    setAcctGone(true);
+  }, [saveAccount]);
   useEffect(() => {
     (async () => {
       try {
@@ -2210,6 +2255,12 @@ export default function App() {
         fetch("/auth/claim", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ code: keys.code || "", device: DEVICE.id }),
+        }).then(async () => {
+          /* native shell: the APNs token must follow the re-claim, or the
+             device is known but unreachable until the bell is toggled */
+          if (!NATIVE() || !alertsOnRef.current || !capPlugin("PushNotifications")) return;
+          const tok = await nativePushToken();
+          if (tok) { await fetch("/push/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apns: tok, device: DEVICE.id }) }); setPushArmed(true); }
         }).catch(() => {});
       } catch (e) {}
     }, 1200);
@@ -2370,6 +2421,14 @@ export default function App() {
   }, []);
 
   useEffect(() => { alertsOnRef.current = alertsOn; }, [alertsOn]);
+  useEffect(() => {
+    /* native shell: a push that lands while the app is open shows as the
+       in-app banner; iOS does not display it on its own in the foreground */
+    const PN = NATIVE() && capPlugin("PushNotifications");
+    if (!PN) return;
+    const h = PN.addListener("pushNotificationReceived", (n) => { try { notify(n.title || "Scanner alert", n.body || ""); } catch (e) {} });
+    return () => { try { (h && h.remove ? h.remove() : Promise.resolve(h).then((x) => x && x.remove && x.remove())); } catch (e) {} };
+  }, []);
   const pushArmedRef = useRef(false);
   useEffect(() => { pushArmedRef.current = pushArmed; }, [pushArmed]);
   useEffect(() => {
@@ -2436,8 +2495,15 @@ export default function App() {
       audioRef.current = new Ctx();
     } catch (e) {}
     let armed = false;
+    let denied = false;
     try {
-      if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
+      if (NATIVE() && capPlugin("PushNotifications")) {
+        const tok = await nativePushToken();
+        if (tok) {
+          const r = await fetch("/push/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apns: tok, device: DEVICE.id || undefined }) });
+          armed = r.ok;
+        } else denied = true;
+      } else if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
         const reg = await navigator.serviceWorker.register("/sw.js");
         const perm = await Notification.requestPermission();
         if (perm === "granted") {
@@ -2460,7 +2526,10 @@ export default function App() {
     setPushArmed(armed);
     setAlertsOn(true);
     notify(armed ? "🔔 Lock-screen alerts armed" : "🔔 In-app alerts on",
-      armed ? "The server is now watching the tape and will push to this device." : "Add to Home Screen (iOS) or use desktop/Android for lock-screen push.");
+      armed ? "The server is now watching the tape and will push to this device."
+        : denied ? "Allow notifications for Momentum Scanner in iOS Settings to get lock-screen push."
+        : NATIVE() ? "Lock-screen push is not available on this server yet."
+        : "Add to Home Screen (iOS) or use desktop/Android for lock-screen push.");
   };
 
   /* Full-market sweep on the consolidated tape */
@@ -3131,10 +3200,11 @@ export default function App() {
                 <div style={{ flex: 1 }} />
                 <span onClick={() => setAcctOpen(true)} style={{ color: C.dim, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, flexShrink: 0 }}>Plan</span>
                 <span onClick={() => saveAccount(null)} style={{ color: C.dim, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, flexShrink: 0 }}>Sign out</span>
+                <span onClick={deleteAccount} style={{ color: C.down, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3, flexShrink: 0 }}>Delete account</span>
               </>
             ) : (
               <>
-                <span style={{ color: C.muted }}>Not signed in</span>
+                <span style={{ color: acctGone ? C.up : C.muted }}>{acctGone ? "Account deleted — your synced data is gone from our server." : "Not signed in"}</span>
                 <div style={{ flex: 1 }} />
                 <span onClick={() => setAcctOpen(true)} style={{ color: C.amber, cursor: "pointer", fontWeight: 700 }}>Create account →</span>
               </>

@@ -1,7 +1,7 @@
 # Momentum Scanner — Agent Handoff
 
 Operating manual for an AI agent taking over development. Written 2026-09-04,
-current as of commit `81b0d64`.
+current as of the App Store shell commit (see `git log`).
 
 Owner: Corey Putney. Repo: `putneyc11/Momentum-scanner`.
 
@@ -110,6 +110,8 @@ PR bodies, or code comments.
 | `ANTHROPIC_API_KEY` | for AI plans | Enables `POST /plan`. Without it `/config` reports `plans:false` and the UI hides the card. |
 | `PLAN_MODEL` | no | Defaults to `claude-opus-5`. |
 | `PLAN_EFFORT` | no | Defaults to `medium`. Ignored for Haiku models. |
+| `APNS_KEY_P8` / `APNS_KEY_ID` / `APNS_TEAM_ID` | for the iOS app | Turns on APNs delivery for the native shell. `APNS_BUNDLE_ID` (default `com.momentumscanner.app`), `APNS_SANDBOX=1` for Xcode-debug tokens, `APNS_HOST` for tests. `/config` reports `apns`. |
+| `SUPPORT_EMAIL` | no | Address printed on `/privacy`, `/terms`, `/support`. |
 | `SERVER_FEED` | no | `sip` (default) or `iex`. Sets the feed clients get in server-keys mode. |
 | `LEGACY_PUSH` | no | `1` restores the old behavior where every single trigger pushes. Default `0` (confluence-gated). |
 | `PUSH_HOURLY_CAP` | no | Default 6. Overflow rolls into a digest. |
@@ -189,8 +191,9 @@ Then, with `PW_EXECUTABLE` pointing at the sandbox Chromium:
 
 | Suite | Clock pinned to | Expect |
 |---|---|---|
-| `tests/test26.js` | 13:00 ET | 32 checks, Advanced view |
-| `tests/test28.js` | 17:30 ET | 16 checks, alerts + After Hours |
+| `tests/test26.js` | 13:00 ET | 35 checks, Advanced view |
+| `tests/test28.js` | 17:30 ET | 19 checks, alerts + After Hours |
+| `tests/test-native.js` | 13:00 ET | 18 checks, App Store (Capacitor) mode with a fake bridge |
 | `tests/test-pm.js` | 07:30 ET | 8 checks, premarket discovery |
 | `tests/test-onboard.js` | 13:00 ET | 19 checks, onboarding + accounts |
 
@@ -256,6 +259,16 @@ Gotchas that will waste your time:
   wired. Real auth arrives with the native shell.
 - **Watchlist row layout.** News icon and DIL tag sit at the end of the row
   after the bell; rows scroll horizontally for overflow.
+- **App Store shell (Phase 2, repo side complete).** `native/` holds the
+  Capacitor iOS project config (remote-loads the Render URL), icon/splash,
+  privacy manifest, Info.plist patch script and App Store Connect copy.
+  Server: APNs over HTTP/2 with an ES256 provider JWT (`sendPush` routes any
+  `{ apns }` subscription there; dead tokens fold into 410), `/auth/forget`
+  account deletion, `/privacy` `/terms` `/support`. Client: `NATIVE()` detects
+  the shell; in it the simulated Apple/Google providers and the pretend Pro
+  purchase are hidden (3.1.1 / 4.8), the bell registers an APNs token via the
+  PushNotifications plugin, foreground pushes become in-app banners, Settings
+  has Delete account (5.1.1(v)). The Mac-side steps are in `docs/APP_STORE.md`.
 
 ---
 
@@ -363,8 +376,9 @@ Target price around $9.99/month. All vendor figures in that file are planning
 numbers and must be confirmed in writing before anyone relies on them.
 
 Explicitly deferred by the owner, do not start without asking: edge stats,
-strategy-grade alerts, a 9:15 digest, websocket streaming, Phase 2 Capacitor
-iOS shell with APNs.
+strategy-grade alerts, a 9:15 digest, websocket streaming. The Phase 2
+Capacitor shell is built (see §7); StoreKit billing and Sign in with Apple
+are the next native items and need owner sign-off on pricing.
 
 ---
 

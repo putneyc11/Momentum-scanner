@@ -100,6 +100,16 @@ requires per-user real-time display entitlements to function.
 - Disclosures move to an ⓘ-opened About page; home screen keeps only a
   one-line "Not financial advice" in small type.
 
+## App Store build (native shell)
+
+- `native/` is a Capacitor iOS shell that loads the deployed web app and adds
+  APNs push. Web deploys reach the native app without a store review.
+- In the shell the account flow is **email + Free only**: simulated Apple /
+  Google sign-in and the pretend Pro purchase are hidden until StoreKit and
+  Sign in with Apple are real (App Store 3.1.1, 4.8). Delete account lives in
+  Settings (5.1.1(v)). `/privacy`, `/terms`, `/support` are served by the app.
+- Shipping steps: `docs/APP_STORE.md`. Store copy: `native/store/metadata.md`.
+
 ## Accounts & plans (preview)
 
 - First run: walkthrough → **Create account** (Continue with Apple / Google /
