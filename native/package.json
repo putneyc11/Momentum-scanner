@@ -1,0 +1,24 @@
+{
+  "name": "momentum-scanner-ios",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Capacitor iOS shell for Momentum Scanner. The web app itself is served by the Render deployment; this project wraps it in a native container with APNs push.",
+  "scripts": {
+    "ios:add": "cap add ios && bash scripts/ios-setup.sh",
+    "ios:sync": "cap sync ios",
+    "ios:open": "cap open ios",
+    "assets": "capacitor-assets generate --ios --iconBackgroundColor '#0A0E13' --iconBackgroundColorDark '#0A0E13' --splashBackgroundColor '#0A0E13' --splashBackgroundColorDark '#0A0E13'"
+  },
+  "dependencies": {
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0",
+    "@capacitor/push-notifications": "^7.0.0",
+    "@capacitor/splash-screen": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.0.0"
+  }
+}

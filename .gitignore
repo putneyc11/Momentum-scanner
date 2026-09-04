@@ -3,3 +3,6 @@ package-lock.json
 build/app.entry.jsx
 build/bundle.js
 tests/server.js
+native/ios/
+native/node_modules/
+native/icons/

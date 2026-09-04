@@ -21,6 +21,16 @@
                    disclosures, and the server-keys connect screen (access
                    code, no key fields).
 
+- test-apns.js   — server unit: APNs for the iOS shell — provider JWT (ES256,
+                   kid/iss/iat, 50-min cache), aps payload, HTTP/2 headers on
+                   the wire against a local stub, dead-token folding,
+                   /push/register { apns }, /auth/forget, legal pages.
+                   Run from tests/: `cp ../deploy/server.js . && node test-apns.js`
+- test-native.js — Playwright UI: App Store (Capacitor) mode via a fake
+                   window.Capacitor bridge — simulated providers and pretend
+                   billing hidden, APNs token registered through the bell,
+                   denied-permission hint, foreground push → banner, Delete
+                   account → /auth/forget, About legal links. Server on :8787.
 - test-dup.js    — server unit: every duplicate-notification scenario (subscription
                    replacement, unified volume alert, bar consumption, cooldowns,
                    baseline swallowing). Run with server.js in the same directory:

@@ -125,7 +125,90 @@ function encryptPayload(clientPubB64u, authB64u, plaintext) {
   return Buffer.concat([header, ct]);
 }
 
+/* ============================ APNs (native iOS shell) ============================
+   The App Store build is a Capacitor WKWebView, where service-worker push does
+   not exist — the native app registers with APNs and hands its device token to
+   /push/register as { apns: token }. Delivery uses the token-based provider API:
+   an ES256 JWT (p8 key, key id, team id) over HTTP/2 to api.push.apple.com.
+   Implemented with node:crypto + node:http2 so the server stays dependency-free.
+   Env: APNS_KEY_P8 (PEM, base64 accepted), APNS_KEY_ID, APNS_TEAM_ID,
+        APNS_BUNDLE_ID, APNS_SANDBOX=1 for TestFlight/Xcode-debug tokens. */
+const http2 = require("http2");
+function loadApnsKey() {
+  let raw = process.env.APNS_KEY_P8 || "";
+  if (!raw) return null;
+  if (!raw.includes("-----BEGIN")) { try { raw = Buffer.from(raw, "base64").toString("utf8"); } catch (e) {} }
+  raw = raw.replace(/\\n/g, "\n");
+  try { return crypto.createPrivateKey({ key: raw, format: "pem" }); } catch (e) { console.log("APNs key unreadable:", String(e.message || e)); return null; }
+}
+const APNS = (() => {
+  const key = loadApnsKey();
+  if (!key || !process.env.APNS_KEY_ID || !process.env.APNS_TEAM_ID) return null;
+  return {
+    key, keyId: process.env.APNS_KEY_ID, teamId: process.env.APNS_TEAM_ID,
+    topic: process.env.APNS_BUNDLE_ID || "com.momentumscanner.app",
+    host: process.env.APNS_HOST || (process.env.APNS_SANDBOX === "1" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com"),
+  };
+})();
+if (APNS) console.log("APNs configured →", APNS.host, "topic", APNS.topic);
+let apnsTok = { jwt: "", t: 0 };
+function apnsJWT(now) {
+  const at = now || Date.now();
+  if (apnsTok.jwt && at - apnsTok.t < 50 * 60e3) return apnsTok.jwt; /* Apple: refresh 20–60 min */
+  const h = b64u(Buffer.from(JSON.stringify({ alg: "ES256", kid: APNS.keyId })));
+  const p = b64u(Buffer.from(JSON.stringify({ iss: APNS.teamId, iat: Math.floor(at / 1000) })));
+  const sig = crypto.sign("sha256", Buffer.from(h + "." + p), { key: APNS.key, dsaEncoding: "ieee-p1363" });
+  apnsTok = { jwt: h + "." + p + "." + b64u(sig), t: at };
+  return apnsTok.jwt;
+}
+/* the APNs body: title/body on the lock screen, a stable thread per alert key so
+   repeats collapse, and the key itself so the app can dedupe / deep-link */
+function apnsPayload(d) {
+  return {
+    aps: { alert: { title: d.title || "Scanner alert", body: d.body || "" }, sound: "default", "thread-id": (d.key || "").split("-")[0] || "scanner", "interruption-level": "time-sensitive" },
+    key: d.key || "",
+  };
+}
+let apnsSession = null;
+function apnsConnect() {
+  if (apnsSession && !apnsSession.closed && !apnsSession.destroyed) return apnsSession;
+  apnsSession = http2.connect(APNS.host);
+  apnsSession.on("error", () => { try { apnsSession.destroy(); } catch (e) {} apnsSession = null; });
+  apnsSession.on("close", () => { apnsSession = null; });
+  return apnsSession;
+}
+function sendApns(token, payloadObj) {
+  return new Promise((resolve) => {
+    if (!APNS) return resolve(0);
+    try {
+      const body = Buffer.from(JSON.stringify(apnsPayload(payloadObj)));
+      const hdr = {
+        ":method": "POST", ":path": "/3/device/" + token,
+        authorization: "bearer " + apnsJWT(),
+        "apns-topic": APNS.topic, "apns-push-type": "alert", "apns-priority": "10", "apns-expiration": String(Math.floor(Date.now() / 1000) + 120),
+        "content-type": "application/json", "content-length": body.length,
+      };
+      if (payloadObj.key) hdr["apns-collapse-id"] = String(payloadObj.key).slice(0, 64);
+      const req2 = apnsConnect().request(hdr);
+      let status = 0, text = "";
+      req2.on("response", (h) => { status = Number(h[":status"]) || 0; });
+      req2.on("data", (c) => { text += c; });
+      req2.on("end", () => {
+        /* Apple returns 400 BadDeviceToken / 410 Unregistered for dead tokens;
+           fold both into 410 so the existing dead-subscription sweep drops them */
+        if (status === 400 && /BadDeviceToken|DeviceTokenNotForTopic/.test(text)) status = 410;
+        if (status === 403 && /ExpiredProviderToken/.test(text)) apnsTok = { jwt: "", t: 0 };
+        resolve(status);
+      });
+      req2.on("error", () => resolve(0));
+      req2.setTimeout(8000, () => { try { req2.close(); } catch (e) {} resolve(0); });
+      req2.end(body);
+    } catch (e) { resolve(0); }
+  });
+}
+
 function sendPush(sub, payloadObj) {
+  if (sub && sub.apns) return sendApns(sub.apns, payloadObj);
   return new Promise((resolve) => {
     try {
       const url = new URL(sub.endpoint);
@@ -830,6 +913,69 @@ const MANIFEST = JSON.stringify({
 
 const ICON = Buffer.from("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", "base64");
 
+/* ---- legal & support pages: App Store Connect needs public Privacy Policy and
+   Support URLs, and a subscription app must link Terms + Privacy from inside the
+   binary. Served from here so they live at the app's own origin. ---- */
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@momentumscanner.app";
+const LEGAL = {
+  "/privacy": { title: "Privacy Policy", body: `
+<p><em>Effective ${new Date().toISOString().slice(0, 10)}</em></p>
+<h2>What we collect</h2>
+<ul>
+<li><b>Account</b> — the email address you sign up with (or the identifier your Apple / Google account provides) and the plan you chose. Used to sign you in and sync your watchlist and alert rules between your devices.</li>
+<li><b>Device</b> — a random identifier this app generates on first launch, and, if you enable lock-screen alerts, the push token Apple or your browser issues for this device. Used only to deliver the alerts you asked for.</li>
+<li><b>Watchlist &amp; alert rules</b> — the symbols, price levels and alert categories you set. Held on our server so alerts can be monitored while the app is closed.</li>
+<li><b>Diagnostics</b> — the server logs request timestamps and HTTP status codes for reliability. No analytics or advertising SDKs are included.</li>
+</ul>
+<h2>What we don't do</h2>
+<ul>
+<li>We do not sell or share personal data with third parties for marketing.</li>
+<li>We do not track you across other companies' apps or websites.</li>
+<li>Market data comes from Alpaca Markets; the only things sent to Alpaca are the symbols being quoted. Optional AI trade plans send today's computed price levels for one symbol to Anthropic — never your identity.</li>
+</ul>
+<h2>Retention &amp; deletion</h2>
+<p>Account and watchlist data are kept while your account is active. Delete your account from Settings, or email <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> and we will remove it within 30 days.</p>
+<h2>Children</h2>
+<p>This app is not directed at children under 13 and we do not knowingly collect data from them.</p>
+<h2>Changes</h2>
+<p>We will post any changes here and update the effective date.</p>
+<h2>Contact</h2>
+<p><a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>` },
+  "/terms": { title: "Terms of Use", body: `
+<p><em>Effective ${new Date().toISOString().slice(0, 10)}</em></p>
+<h2>Not investment advice</h2>
+<p>Momentum Scanner provides market information, heuristics and generated text for educational purposes only. Nothing in the app is a recommendation to buy or sell any security. Small-cap momentum stocks are extremely volatile and most gaps fade. You are solely responsible for your trading decisions.</p>
+<h2>Data</h2>
+<p>Quotes, bars and halt estimates may be delayed, incomplete or wrong. Estimated LULD bands and halt flags are heuristics, not the official exchange feed. AI trade plans are generated text and can be incorrect.</p>
+<h2>Subscriptions</h2>
+<p>Pro is billed through your Apple ID as an auto-renewing subscription. Payment is charged at confirmation of purchase; the subscription renews automatically unless cancelled at least 24 hours before the end of the current period. Manage or cancel it in your Apple ID settings. Free trials convert to a paid subscription unless cancelled before the trial ends. Where offered, Pro features are subject to the market-data plan available to us.</p>
+<h2>Acceptable use</h2>
+<p>Don't redistribute the data feed, reverse-engineer the service, or use it in a way that breaks the law or our data providers' terms.</p>
+<h2>Liability</h2>
+<p>The app is provided "as is". To the fullest extent permitted by law we disclaim all warranties and are not liable for any trading losses or damages arising from use of the app.</p>
+<h2>Apple</h2>
+<p>Apple's standard Licensed Application End User License Agreement applies to App Store downloads. Apple is not responsible for the app or its content.</p>
+<h2>Contact</h2>
+<p><a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></p>` },
+  "/support": { title: "Support", body: `
+<p>Questions, bugs, or a data problem? Email <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> — include your iOS version and, for alert problems, the ticker and the time (ET).</p>
+<h2>Common questions</h2>
+<ul>
+<li><b>No lock-screen alerts.</b> Enable notifications for Momentum Scanner in iOS Settings, then turn the bell on inside the app.</li>
+<li><b>Prices not updating.</b> A red FEED DOWN strip explains why; usually the market-data connection needs a moment or the app needs a reload.</li>
+<li><b>Nothing on the watchlist.</b> Discovery runs 4:00 AM – 8:00 PM ET on trading days. Outside those hours the list is empty by design.</li>
+<li><b>Manage or cancel Pro.</b> iOS Settings → your name → Subscriptions.</li>
+<li><b>Delete my account.</b> Settings → Delete account, or email us.</li>
+</ul>
+<p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Use</a></p>` },
+};
+function legalPage(u) {
+  const L = LEGAL[u];
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${L.title} · Momentum Scanner</title>
+<style>body{margin:0;background:#0A0E13;color:#D9DEE5;font:16px/1.6 system-ui,-apple-system,sans-serif}main{max-width:680px;margin:0 auto;padding:36px 22px 60px}h1{font-size:26px;margin:0 0 4px}h2{font-size:15px;letter-spacing:1.2px;text-transform:uppercase;color:#E0A83A;margin:26px 0 8px}a{color:#E0A83A}.k{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:2px;color:#E0A83A}li{margin:6px 0}</style></head>
+<body><main><div class="k">MOMENTUM SCANNER</div><h1>${L.title}</h1>${L.body}</main></body></html>`;
+}
+
 /* ============================ HTTP server ============================ */
 function readBody(req) {
   return new Promise((res) => {
@@ -876,10 +1022,23 @@ const server = http.createServer(async (req, res) => {
   if (u === "/sw.js") { res.writeHead(200, { "Content-Type": "application/javascript" }); res.end(SW_JS); return; }
   if (u === "/manifest.json") { res.writeHead(200, { "Content-Type": "application/manifest+json" }); res.end(MANIFEST); return; }
   if (u === "/icon.png") { res.writeHead(200, { "Content-Type": "image/png" }); res.end(ICON); return; }
+  if (LEGAL[u]) { res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=3600" }); res.end(legalPage(u)); return; }
 
   if (u === "/config" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ serverKeys: SERVER_KEYS, invite: !!INVITE_CODE, feed: SERVER_FEED, plans: !!ANTHROPIC_API_KEY, planModel: ANTHROPIC_API_KEY ? PLAN_MODEL : null }));
+    res.end(JSON.stringify({ serverKeys: SERVER_KEYS, invite: !!INVITE_CODE, feed: SERVER_FEED, plans: !!ANTHROPIC_API_KEY, planModel: ANTHROPIC_API_KEY ? PLAN_MODEL : null, apns: !!APNS }));
+    return;
+  }
+  if (u === "/auth/forget" && req.method === "POST") {
+    /* account deletion (App Store 5.1.1(v)): drop everything the server holds
+       for this device — account, watchlist, prefs, push token. Always 200. */
+    try {
+      const b = JSON.parse(await readBody(req));
+      const id = String(b.device || "");
+      if (devices[id]) { delete devices[id]; saveDevices(); console.log("account deleted for device"); }
+    } catch (e) {}
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
   if (u === "/auth/claim" && req.method === "POST") {
@@ -945,6 +1104,12 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/register" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
+      if (b.apns && typeof b.apns === "string") {
+        /* native iOS shell: an APNs device token stands in for the Web Push subscription */
+        if (!/^[0-9a-fA-F]{32,200}$/.test(b.apns)) throw new Error("bad apns token");
+        if (!APNS) throw new Error("APNs is not configured on this server");
+        b.subscription = { apns: b.apns.toLowerCase(), endpoint: "apns:" + b.apns.toLowerCase() };
+      }
       if (!b.subscription || !b.subscription.endpoint) throw new Error("bad subscription");
       if (SERVER_KEYS && b.device) {
         /* per-device: this device's subscription only (must be claimed) */
@@ -1083,4 +1248,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`\n  Momentum scanner running → http://localhost:${PORT}\n`));
 
-module.exports = { computeTriggers, encryptPayload, vapidJWT, setupSignals, tierOf, setupGate, sanitizePlan, journalStats, pivots };
+module.exports = { computeTriggers, encryptPayload, vapidJWT, apnsJWT, apnsPayload, sendPush, APNS, setupSignals, tierOf, setupGate, sanitizePlan, journalStats, pivots };
