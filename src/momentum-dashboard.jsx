@@ -2075,6 +2075,14 @@ export default function App() {
   const [alertCenter, setAlertCenter] = useState(false);
   const [jStats, setJStats] = useState(null); // push follow-through from the server journal
   useEffect(() => {
+    const load = () => fetch("/journal").then((r) => r.json())
+      .then((j) => setJStats(j && j.stats ? j.stats : null)).catch(() => {});
+    load();
+    const id = setInterval(load, 5 * 60000);
+    return () => clearInterval(id);
+  }, []);
+  /* refresh the moment the history opens, so the panel is never a stale copy */
+  useEffect(() => {
     if (!alertCenter) return;
     fetch("/journal").then((r) => r.json()).then((j) => setJStats(j && j.stats ? j.stats : null)).catch(() => {});
   }, [alertCenter]);
@@ -3032,6 +3040,11 @@ export default function App() {
   const selG = gainers.find((g) => g.symbol === selected);
   const sel = selected ? selG || { symbol: selected, pct: null } : null;
   const pmNow = inPremarket(); /* re-evaluated on every render (3s price ticks) */
+  /* push follow-through headline: % of pushes green 15 minutes later. Below
+     10 pushes the sample cannot support a verdict, so it renders neutral. */
+  const jThin = !jStats || !jStats.n || jStats.n < 10;
+  const jHit = jStats && jStats.n ? Math.round(jStats.green15) : null;
+  const jHitCol = jThin ? C.muted : jHit >= 50 ? C.up : C.down;
   const inputStyle = { width: "100%", boxSizing: "border-box", marginTop: 5, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, color: C.text, padding: "10px 10px", fontFamily: MONO, fontSize: 14 };
   const labStyle = { fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 };
   const globalCss = `.noscrollbar::-webkit-scrollbar{display:none}.noscrollbar{scrollbar-width:none}canvas{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}.chartbox,.chartbox *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}`;
@@ -3161,6 +3174,13 @@ export default function App() {
           style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: MONO, display: "flex", alignItems: "center", gap: 6 }}>
           <BellIcon muted={!alertsOn} /> {alertsOn ? (pushArmed ? "Lock-screen" : "On") : "Off"}
         </button>
+        <button onClick={() => setAlertCenter(true)}
+          aria-label={jHit == null ? "push follow-through: no pushes recorded yet" : `push follow-through: ${jHit}% green 15 minutes after the push, ${jStats.n} pushes over 20 days`}
+          title="how the last 20 days of pushes actually followed through"
+          style={{ background: "transparent", border: `1px solid ${jThin ? C.border : jHitCol + "55"}`, color: C.dim, borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontFamily: MONO, fontSize: 12, lineHeight: "15px", display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+          <span style={{ fontSize: 9, letterSpacing: 1.2 }}>HIT</span>
+          <span style={{ fontWeight: 800, color: jHit == null ? C.dim : jHitCol }}>{jHit == null ? "—" : jHit + "%"}</span>
+        </button>
         <button onClick={openHelp} aria-label="watch the feature walkthrough" title="feature walkthrough"
           style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 11px", cursor: "pointer", fontSize: 12, fontFamily: MONO }}>
           ?
@@ -3215,16 +3235,52 @@ export default function App() {
           <div onClick={(e) => e.stopPropagation()}
             style={{ width: "100%", maxHeight: "78dvh", background: C.panel, borderTop: `1px solid ${C.amber}66`, borderRadius: "14px 14px 0 0", display: "flex", flexDirection: "column", paddingBottom: "env(safe-area-inset-bottom)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
-              <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase" }}>🔔 Alerts</span>
+              <span style={{ color: C.amber, display: "flex" }}><BellIcon size={14} /></span>
+              <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase" }}>Alerts</span>
               <span style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>{alertLog.length} today</span>
               <div style={{ flex: 1 }} />
               <button onClick={() => setAlertLog([])} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "5px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>Clear all</button>
               <button onClick={() => setAlertCenter(false)} style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "5px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Close</button>
             </div>
-            <div style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
-              {jStats && jStats.n > 0
-                ? <>PUSH FOLLOW-THROUGH · 20D · {jStats.n} pushes · <span style={{ color: jStats.green15 >= 50 ? C.up : C.down }}>{Math.round(jStats.green15)}% green at 15m</span> · avg {jStats.avg15 >= 0 ? "+" : ""}{jStats.avg15.toFixed(1)}% at 15m{jStats.avgMaxUp30 != null ? <> · avg peak +{jStats.avgMaxUp30.toFixed(1)}% within 30m</> : null}</>
-                : <>PUSH FOLLOW-THROUGH · builds after the first confluence pushes land (5 / 15 / 30-minute prices are journaled for every push)</>}
+            <div style={{ padding: "12px 16px 14px", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: jStats && jStats.n > 0 ? 10 : 6 }}>
+                <span style={{ fontFamily: MONO, fontSize: 9, letterSpacing: 1.4, color: C.amber, textTransform: "uppercase" }}>Push follow-through</span>
+                <div style={{ flex: 1 }} />
+                {jStats && jStats.n > 0 && (
+                  <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim, whiteSpace: "nowrap" }}>{jStats.n} push{jStats.n === 1 ? "" : "es"} · 20 days</span>
+                )}
+              </div>
+              {jStats && jStats.n > 0 ? (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+                    {[
+                      ["Green at 15m", jHit + "%", jThin ? C.text : jHit >= 50 ? C.up : C.down],
+                      ["Avg at 15m", (jStats.avg15 >= 0 ? "+" : "") + jStats.avg15.toFixed(1) + "%", jStats.avg15 >= 0 ? C.up : C.down],
+                      ["Avg peak 30m", jStats.avgMaxUp30 != null ? "+" + jStats.avgMaxUp30.toFixed(1) + "%" : "—", C.text],
+                    ].map(([label, value, col]) => (
+                      <div key={label}>
+                        <div style={{ fontFamily: MONO, fontSize: 17, fontWeight: 700, color: col, lineHeight: 1.15 }}>{value}</div>
+                        <div style={{ fontSize: 8.5, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase", marginTop: 3 }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {jThin && (
+                    <div style={{ marginTop: 8, fontSize: 10, color: C.muted, lineHeight: 1.4 }}>
+                      Thin sample. Under 10 pushes these numbers move too much to tune against.
+                    </div>
+                  )}
+                  {jStats.tier2 && jStats.tier3 && jStats.tier2.n > 0 && jStats.tier3.n > 0 && (
+                    <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.border}66`, display: "flex", gap: 16, fontFamily: MONO, fontSize: 10, color: C.muted }}>
+                      <span>Setup <b style={{ color: C.text, fontWeight: 700 }}>{Math.round(jStats.tier2.green15)}%</b> <span style={{ color: C.dim }}>({jStats.tier2.n})</span></span>
+                      <span>Breakout <b style={{ color: C.text, fontWeight: 700 }}>{Math.round(jStats.tier3.green15)}%</b> <span style={{ color: C.dim }}>({jStats.tier3.n})</span></span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+                  No pushes recorded yet. Every confluence push is logged with the price 5, 15 and 30 minutes later, and the rate appears here once they land.
+                </div>
+              )}
             </div>
             <div style={{ overflowY: "auto", flex: 1 }}>
               {alertLog.length === 0 && <div style={{ padding: 20, color: C.dim, fontFamily: MONO, fontSize: 12 }}>No alerts yet today.</div>}

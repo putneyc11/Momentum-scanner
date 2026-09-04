@@ -73,6 +73,8 @@ function barsAH(sym, n){
   await page.route('**/push/**', (r) => r.fulfill({ json: { ok: true, key: 'x' } }));
   await page.route('**/push/status', (r) => r.fulfill({ json: { devices: 1, lastError: null } }));
   await page.route('**/push/watchlist', (r) => { syncedSyms = JSON.parse(r.request().postData() || '{}').symbols || []; r.fulfill({ json: { ok: true } }); });
+  await page.route('**/journal', (r) => r.fulfill({ json: { stats: { n: 23, green15: 61.5, avg15: 1.42, avgMaxUp30: 3.24,
+    tier2: { n: 15, green15: 56.2 }, tier3: { n: 8, green15: 71.4 } }, recent: [], policy: {} } }));
   await page.route('**/settings', (r) => r.fulfill({ json: {} }));
   await page.goto('http://localhost:8787/', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('span:has-text("GOODA")', { timeout: 20000 });
@@ -85,6 +87,33 @@ function barsAH(sym, n){
   console.log(syncedSyms.includes('WKLO') ? '✓ WETO-class runner (worst score, off the top-15) IS monitored for alerts' : '✗ WKLO not synced — WETO would be missed again');
 
   // ---- 2) in-app alert fires (mom3) → banner appears ----
+  /* push follow-through: reachable with NO alert banner on screen. Before the
+     header chip existed the stats could only be opened from the banner, so on a
+     quiet day they could not be reached at all. */
+  const hitChip = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find(x => /^HIT/.test(x.textContent.trim()));
+    if (!b) return null;
+    const bell = [...document.querySelectorAll('button')].find(x => /Lock-screen|^On$|^Off$/.test(x.textContent.trim()));
+    return { text: b.textContent.trim(), banner: document.querySelector('#root').textContent.includes('tap: history'),
+             h: Math.round(b.getBoundingClientRect().height), bellH: bell ? Math.round(bell.getBoundingClientRect().height) : null };
+  });
+  console.log(hitChip && hitChip.text === 'HIT62%' && !hitChip.banner
+    ? '✓ hit-rate chip sits in the header with no alert banner needed'
+    : '✗ hit chip missing or banner-dependent: ' + JSON.stringify(hitChip));
+  console.log(hitChip && hitChip.h === hitChip.bellH ? `✓ chip matches the control-row height (${hitChip.h}px)` : '✗ chip height off: ' + JSON.stringify(hitChip));
+  await page.click('button:has-text("HIT")');
+  await page.waitForTimeout(500);
+  const jPanel = await page.evaluate(() => {
+    const t = document.querySelector('#root').textContent;
+    const vals = [...document.querySelectorAll('div')].filter(d => /^(62%|\+1\.4%|\+3\.2%)$/.test(d.textContent.trim())).length;
+    return { open: t.includes('Push follow-through'), vals, tiers: /Setup\s*56%/.test(t.replace(/\s+/g, ' ')) && /Breakout\s*71%/.test(t.replace(/\s+/g, ' ')), chain: t.includes('\u00b7 20D \u00b7') };
+  });
+  console.log(jPanel.open && jPanel.vals === 3 && jPanel.tiers && !jPanel.chain
+    ? '✓ stats panel shows three measures plus the setup/breakout split'
+    : '✗ stats panel wrong: ' + JSON.stringify(jPanel));
+  await page.click('button:has-text("Close")');
+  await page.waitForTimeout(300);
+
   await page.waitForSelector('text=3 green candles', { timeout: 40000 });
   console.log('✓ mom3 alert fired in-app (3 consecutive green 1-min candles)');
 
