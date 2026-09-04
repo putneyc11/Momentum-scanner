@@ -1,5 +1,16 @@
 # Tests (representative subset)
 
+- test-setup.js  — server unit: the CONFLUENCE PUSH GATE (signals, tiers,
+                   lunch rule, silent baseline, escalation-only re-push,
+                   new-leg after a pullback, daily cap, price floor, stale
+                   tape), the plan sanitiser, journal stats and pivots.
+                   Run from tests/: `cp ../deploy/server.js . && node test-setup.js`
+- test-plan.js   — server unit: POST /plan against a stub Alpaca AND a stub
+                   Anthropic endpoint (level pack contents, JSON-schema
+                   structured output, fallbacks header, prompt caching,
+                   range-checked levels, 5-min cache + refresh rate limit,
+                   refusal / malformed / no-tape errors, /journal, and the
+                   no-key 503). Run from tests/: `cp ../deploy/server.js . && node test-plan.js`
 - test-serverkeys.js — server unit: SERVER-KEYS mode (env-held credentials,
                    invite gate, per-device watchlists, proxy injection,
                    legacy passthrough). Run with server.js in the same
@@ -26,7 +37,9 @@
                    their edges, the header bell opens the per-ticker alerts
                    sheet (categories + price levels), timeframe buttons are
                    real tap targets that select on tap, Copy reports via a
-                   bottom toast, icon-only replay/fit-all, back navigation.
+                   bottom toast, icon-only replay/fit-all, the AI trade plan
+                   card (idle until Analyze, three scenarios, level chips →
+                   price alerts, levels on the chart), back navigation.
                    Clock pinned to 13:00 ET so the RTH discovery path runs.
 - test28.js      — Playwright UI: alert coverage beyond the top-15, mom3 in-app,
                    alert-center modal, swipe-to-clear, the After Hours table

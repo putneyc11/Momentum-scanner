@@ -384,17 +384,17 @@ function drawChart(canvas, bars, opts) {
     if (l.price == null) continue;
     const yy = y(l.price);
     if (yy < padT - 4 || yy > padT + ph + 4) continue;
-    const col = l.kind === "pmh" ? C.amber : "#5A7184";
+    const col = l.kind === "pmh" ? C.amber : l.kind === "sup" ? C.up : l.kind === "res" ? C.down : "#5A7184";
     ctx.strokeStyle = col + "BB";
     ctx.setLineDash([5, 4]);
     ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
     ctx.setLineDash([]);
     if (o.axes) {
       /* opaque chips so PMH/PML never garble the price ticks; PML sits BELOW its line */
-      const pmTxt = (l.kind === "pmh" ? "PMH $" : "PML $") + fp(l.price);
+      const pmTxt = (l.kind === "pmh" ? "PMH $" : l.kind === "pml" ? "PML $" : (l.label || (l.kind === "sup" ? "S" : "R")) + " $") + fp(l.price);
       ctx.font = `bold 9px ${MONO}`;
       const tw = ctx.measureText(pmTxt).width;
-      const ty = l.kind === "pmh" ? yy - 4 : yy + 12;
+      const ty = l.kind === "pmh" || l.kind === "res" ? yy - 4 : yy + 12;
       ctx.fillStyle = "#0A0E13";
       ctx.fillRect(W - padR + 2, ty - 8, tw + 7, 11);
       ctx.fillStyle = col;
@@ -506,7 +506,7 @@ function Spark({ bars, up, h, fill }) {
      and clipped its padding entirely. marginRight keeps a real gap between
      the end of the line and the row edge at every width. */
   return <canvas ref={ref} style={{
-    ...(fill ? { flex: "0 1 72px", minWidth: 16, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
+    ...(fill ? { flex: "0 1 72px", minWidth: 30, maxWidth: 72, width: "auto" } : { width: 72, flexShrink: 0 }),
     height: h || 24, display: "block", marginRight: fill ? 0 : 10,
   }} />;
 }
@@ -555,7 +555,7 @@ function NewsIcon({ size }) {
 /* ---------------- watchlist row ---------------- */
 /* per-ticker alert categories a user can switch off individually */
 const ALERT_CATS = [
-  ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
+  ["setup", "Setup pushes"], ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
   ["mom3", "3 green"], ["vol", "Volume surge"], ["halt", "Halts"], ["rot", "Rotation"],
 ];
 
@@ -567,16 +567,17 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
      NEVER overflows — overflow is what used to jam the spark flush against
      the row edge with zero padding. The chevron is desktop-only (on phones
      it was always clipped anyway, and the whole row is tappable). */
-  const w = fill ? { tick: 50, price: 52, pct: 62, vol: 42 } : { tick: 54, price: 56, pct: 66, vol: 48 };
+  const w = fill ? { tick: 46, price: 50, pct: 58, vol: 40 } : { tick: 54, price: 56, pct: 66, vol: 48 };
   return (
     <div
       onClick={() => onOpen(g.symbol)}
-      style={{ display: "flex", alignItems: "center", gap: fill ? 6 : 10, padding: "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
+      className="noscrollbar"
+      style={{ display: "flex", alignItems: "center", gap: fill ? 3 : 10, padding: fill ? "9px 10px" : "9px 12px", borderBottom: `1px solid ${C.border}88`, cursor: "pointer", overflowX: "auto", WebkitOverflowScrolling: "touch", ...(fill ? { height: 64, boxSizing: "border-box", position: "relative" } : {}) }}
     >
-      <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: "2px 6px", minWidth: 40, textAlign: "center", flexShrink: 0 }}>
+      <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 800, color: gradeColor(g.grade), background: gradeColor(g.grade) + "1A", border: `1px solid ${gradeColor(g.grade)}55`, borderRadius: 5, padding: fill ? "2px 5px" : "2px 6px", minWidth: fill ? 34 : 40, textAlign: "center", flexShrink: 0 }}>
         {g.grade} {g.score}
       </span>
-      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
+      <span style={{ fontWeight: 800, fontSize: 14, minWidth: w.tick, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap", flexShrink: 0 }}>
         {g.symbol}
         {halted && (
           <span style={{ color: C.down, fontSize: 10, fontFamily: MONO }}>
@@ -584,16 +585,9 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           </span>
         )}
         {g.pct >= 200 && <span title="verify split/relisting" style={{ color: C.amber, fontSize: 10 }}>⚠</span>}
-        {news && (
-          /* catalyst attached — full headline lives in the Advanced view */
-          <span title={news.headline} style={{ color: news.dilution ? C.down : C.dim, display: "inline-flex", alignItems: "center", gap: 2 }}>
-            <NewsIcon />
-            {news.dilution && <span style={{ fontSize: 8, fontWeight: 800 }}>dil</span>}
-          </span>
-        )}
       </span>
-      <span style={{ fontFamily: MONO, fontSize: 13, minWidth: w.price }}>{fp(g.price)}</span>
-      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down, minWidth: w.pct }}>
+      <span style={{ fontFamily: MONO, fontSize: 13, minWidth: w.price, flexShrink: 0 }}>{fp(g.price)}</span>
+      <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 700, color: g.pct >= 0 ? C.up : C.down, minWidth: w.pct, flexShrink: 0 }}>
         {fpct(g.pct)}
         {ah && !fill && <span style={{ display: "block", fontSize: 9, fontWeight: 700, color: C.ema21, whiteSpace: "nowrap" }}>{`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}</span>}
       </span>
@@ -604,7 +598,7 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           {`AH ${fpct(ah.pct)}\u00A0\u00A0\u00B7\u00A0\u00A0${fv(ah.vol)}`}
         </span>
       )}
-      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol }}>
+      <span style={{ fontFamily: MONO, fontSize: 11, color: C.muted, minWidth: w.vol, flexShrink: 0 }}>
         {fv(g.dayVol)}
         {g.rotation != null && g.rotation >= 0.5 && (
           /* float rotation: cumulative volume ÷ float — the gap trader's #1 stat */
@@ -622,8 +616,16 @@ function GainerRow({ g, bars, halted, haltedAt, news, onOpen, fill, ah, muted, o
           onClick={(e) => { e.stopPropagation(); onMute(g.symbol); }}
           aria-label={muted ? "unmute alerts for this stock" : "mute alerts for this stock"}
           title={muted ? "alerts muted for this stock — tap to unmute" : "alerts on for this stock — tap to mute"}
-          style={{ display: "flex", alignItems: "center", alignSelf: "stretch", padding: "0 7px", color: muted ? C.dim : C.muted, opacity: muted ? 0.55 : 1, cursor: "pointer", flexShrink: 0 }}>
+          style={{ display: "flex", alignItems: "center", alignSelf: "stretch", padding: "0 5px", color: muted ? C.dim : C.muted, opacity: muted ? 0.55 : 1, cursor: "pointer", flexShrink: 0 }}>
           <BellIcon muted={muted} />
+        </span>
+      )}
+      {news && (
+        /* catalyst attached — sits at the END of the row (scroll to it on a
+           phone); the full headline lives in the Advanced view */
+        <span title={news.headline} style={{ display: "inline-flex", alignItems: "center", gap: 3, color: news.dilution ? C.down : C.dim, flexShrink: 0, paddingRight: 2 }}>
+          <NewsIcon />
+          {news.dilution && <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: 0.5 }}>DIL</span>}
         </span>
       )}
       {!fill && <span style={{ color: C.dim }}>›</span>}
@@ -927,6 +929,10 @@ function AboutPage({ onClose }) {
         </S>
         <S title="Alerts & push">
           The bell on each row arms alerts for just that stock — in-app banners plus lock-screen push (mutes reset each new day). Lock-screen push requires the bell enabled and, on iPhone, the app added to the Home Screen; the server must be awake to monitor — keep it pinged or on a paid instance.
+          Lock-screen pushes fire on confluence, not single events: at least three of VWAP, EMA stack, volume, high-of-day and three-green must line up on the same bar (four over the lunch chop), a stock re-pushes only when it escalates or starts a fresh leg, each stock is capped per day and the feed per hour, and overflow rolls into one digest. Every push is journaled with its 5, 15 and 30-minute follow-through; the alert center shows the running hit rate.
+        </S>
+        <S title="AI trade plans">
+          The Advanced view can ask a language model for support and resistance plus three long-only scenarios, built only from numbers the server computes off today's tape. It is generated text: it can be wrong, it does not know news you do, and it is never a recommendation. Nothing is sent until you tap Analyze, and plans are cached for five minutes.
         </S>
         <S title="Data & keys">
           Market data comes from your own Alpaca keys, entered in Settings and stored on this device; the push server keeps a copy solely to monitor your watchlist.
@@ -958,6 +964,141 @@ const WINS = [
 ];
 const WIN_TF = { "1D": null, "5D": "15Min", "1M": "1Hour", "3M": "1Hour", "6M": "1Day", "1Y": "1Day", "5Y": "1Day" };
 const MAX_BARS = 2000;
+
+/* ---------------- Level 2 ----------------
+   Best bid / best ask up top, a depth chart, and a ladder. Alpaca's stock
+   feed carries the NBBO top of book, not resting depth, so the ladder's
+   first row is the live quote and every row below it is the TRADED depth:
+   shares that actually printed at each price in the last 15 minutes. The
+   chart stacks the same thing outward from the spread. Labeled as such. */
+const fmtInt = (n) => Math.round(n || 0).toLocaleString("en-US");
+function tradedDepth(prints, quote) {
+  const now = Date.now();
+  const bins = new Map();
+  for (const t of prints || []) {
+    if (now - t.t > 15 * 60000 || !(t.p > 0)) continue;
+    const k = Math.round(t.p * 100) / 100;
+    bins.set(k, (bins.get(k) || 0) + t.s);
+  }
+  const bp = quote ? quote.bp : null, ap = quote ? quote.ap : null;
+  const mid = bp && ap ? (bp + ap) / 2 : null;
+  const bids = [], asks = [];
+  for (const [p, sz] of bins) {
+    /* rows beyond the NBBO only: prints AT the bid/ask belong to row 1,
+       prints inside the spread belong to neither side */
+    if (mid == null) continue;
+    if (p < bp) bids.push({ p, s: sz });
+    else if (p > ap) asks.push({ p, s: sz });
+  }
+  bids.sort((a, b) => b.p - a.p);
+  asks.sort((a, b) => a.p - b.p);
+  return { bids, asks, mid };
+}
+function Level2({ quote, prints }) {
+  const ref = useRef(null);
+  const depth = useMemo(() => tradedDepth(prints, quote), [prints, quote]);
+  const bs = quote ? (quote.bs || 0) * 100 : 0, as = quote ? (quote.as || 0) * 100 : 0;
+  const spr = quote ? quote.ap - quote.bp : null;
+  const sprPct = spr != null && depth.mid ? (spr / depth.mid) * 100 : null;
+  const bidRows = quote ? [{ p: quote.bp, s: bs, live: true }, ...depth.bids.slice(0, 4)] : [];
+  const askRows = quote ? [{ p: quote.ap, s: as, live: true }, ...depth.asks.slice(0, 4)] : [];
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv || !quote) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = cv.clientWidth, H = cv.clientHeight;
+    if (!W || !H) return;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const ctx = cv.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const padB = 18, top = 6;
+    /* cumulative from the spread outward; the NBBO size is the first step */
+    const cum = (rows, first) => { let a = first; return rows.map((r) => ({ p: r.p, c: (a += r.s) })); };
+    const bidC = cum(depth.bids, bs), askC = cum(depth.asks, as);
+    const lo = bidC.length ? bidC[bidC.length - 1].p : quote.bp, hi = askC.length ? askC[askC.length - 1].p : quote.ap;
+    const half = Math.max(depth.mid - lo, hi - depth.mid, depth.mid * 0.004);
+    const x0 = depth.mid - half, x1 = depth.mid + half;
+    const X = (p) => ((p - x0) / (x1 - x0)) * W;
+    const maxC = Math.max(bs, as, ...bidC.map((r) => r.c), ...askC.map((r) => r.c), 1);
+    const Y = (c) => top + (H - padB - top) * (1 - c / maxC);
+    const dots = (col) => {
+      const pc = document.createElement("canvas"); pc.width = pc.height = 6;
+      const g = pc.getContext("2d"); g.fillStyle = col; g.globalAlpha = 0.55; g.beginPath(); g.arc(3, 3, 1.2, 0, Math.PI * 2); g.fill();
+      return ctx.createPattern(pc, "repeat");
+    };
+    const side = (rows, first, startP, dir, col) => {
+      /* dir -1 = bids march left, +1 = asks march right */
+      const pts = [[X(startP), Y(first)]];
+      let c = first, p = startP;
+      for (const r of rows) { pts.push([X(r.p), Y(c)]); c += r.s; pts.push([X(r.p), Y(c)]); p = r.p; }
+      const edge = dir < 0 ? 0 : W;
+      pts.push([edge, Y(c)]);
+      ctx.beginPath(); ctx.moveTo(pts[0][0], H - padB);
+      for (const [x, y] of pts) ctx.lineTo(x, y);
+      ctx.lineTo(edge, H - padB); ctx.closePath();
+      ctx.fillStyle = col + "22"; ctx.fill();
+      ctx.fillStyle = dots(col); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(pts[0][0], H - padB);
+      for (const [x, y] of pts) ctx.lineTo(x, y);
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+    };
+    side(depth.bids, bs, quote.bp, -1, C.up);
+    side(depth.asks, as, quote.ap, +1, C.down);
+    ctx.strokeStyle = C.border; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, H - padB + 0.5); ctx.lineTo(W, H - padB + 0.5); ctx.stroke();
+    ctx.font = `10px ${MONO}`; ctx.fillStyle = C.dim; ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left"; ctx.fillText("$" + fp(x0), 4, H - 5);
+    ctx.textAlign = "center"; ctx.fillText("$" + fp(depth.mid), W / 2, H - 5);
+    ctx.textAlign = "right"; ctx.fillText("$" + fp(x1), W - 4, H - 5);
+  }, [quote, depth, bs, as]);
+  const Row = ({ b, a, i }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", padding: "6px 12px", fontFamily: MONO, fontSize: 12, background: i === 0 ? C.panel2 : "transparent", borderBottom: `1px solid ${C.border}44` }}>
+      <span style={{ color: C.text, textAlign: "left" }}>{b ? fmtInt(b.s) : ""}</span>
+      <span style={{ color: C.up, textAlign: "right", paddingRight: 10, borderRight: `1px dotted ${C.border}` }}>{b ? "$" + fp(b.p) : ""}</span>
+      <span style={{ color: C.down, textAlign: "left", paddingLeft: 10 }}>{a ? "$" + fp(a.p) : ""}</span>
+      <span style={{ color: C.text, textAlign: "right" }}>{a ? fmtInt(a.s) : ""}</span>
+    </div>
+  );
+  const nRows = Math.max(bidRows.length, askRows.length);
+  return (
+    <div style={{ borderBottom: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px 0" }}>
+        <span style={{ fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Level 2</span>
+        <span style={{ fontSize: 9, color: C.dim, fontFamily: MONO }}>NBBO · traded depth 15m</span>
+        <div style={{ flex: 1 }} />
+        {sprPct != null && (
+          <span style={{ fontFamily: MONO, fontSize: 9, color: sprPct < 0.3 ? C.up : sprPct < 1 ? C.amber : C.down }}>spread ${spr.toFixed(2)} · {sprPct.toFixed(2)}%</span>
+        )}
+      </div>
+      {!quote && <div style={{ padding: "10px 12px 12px", color: C.dim, fontSize: 11 }}>Waiting for a quote…</div>}
+      {quote && (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "8px 12px 4px" }}>
+            <div>
+              <div style={{ fontSize: 10, color: C.dim }}>Best bid</div>
+              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.up, lineHeight: 1.1 }}>${fp(quote.bp)}</div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>× {fmtInt(bs)}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: C.dim }}>Best ask</div>
+              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.down, lineHeight: 1.1 }}>${fp(quote.ap)}</div>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>{fmtInt(as)} ×</div>
+            </div>
+          </div>
+          <canvas ref={ref} style={{ display: "block", width: "100%", height: 120 }} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", padding: "8px 12px 4px", fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderTop: `1px solid ${C.border}` }}>
+            <span>Size</span><span style={{ textAlign: "right", paddingRight: 10 }}>Bid</span><span style={{ paddingLeft: 10 }}>Ask</span><span style={{ textAlign: "right" }}>Size</span>
+          </div>
+          {Array.from({ length: nRows }, (_, i) => <Row key={i} i={i} b={bidRows[i]} a={askRows[i]} />)}
+          <div style={{ padding: "6px 12px 8px", fontSize: 9, color: C.dim, fontFamily: MONO }}>
+            Row 1 = live NBBO · rows below = shares printed at that price, last 15 min
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 /* Chart chrome lives at MODULE scope on purpose. Defined inside the chart's
    render these were new component types on every data tick, so React
@@ -992,7 +1133,7 @@ const StatCell = ({ label, value, color }) => (
   </div>
 );
 
-function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, onSetLevels, onClose, onAlert }) {
+function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onTogglePref, onSetLevels, onClose, onAlert }) {
   const width = useWidth();
   const mobile = width < 720;
   const [tf, setTf] = useState("1Min");
@@ -1022,6 +1163,17 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
 
   const [replay, setReplay] = useState(null); // {idx, playing} — TAPE REPLAY scrubs the session
   const [alertsOpen, setAlertsOpen] = useState(false); // per-ticker alert sheet (bell in the header)
+  const printsRef = useRef([]);                        // last ~15 min of prints — feeds the Level 2 traded depth
+  /* AI trade plan: levels + three long-only scenarios, built server-side from the tape */
+  const [plan, setPlan] = useState(null);
+  const [planT, setPlanT] = useState(0);
+  const [planPx, setPlanPx] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
+  const [planErr, setPlanErr] = useState("");
+  const [planLines, setPlanLines] = useState(true);
+  const [planTick, setPlanTick] = useState(0);
+  useEffect(() => { setPlan(null); setPlanT(0); setPlanPx(null); setPlanErr(""); }, [symbol]);
+  useEffect(() => { if (!plan) return; const id = setInterval(() => setPlanTick((x) => x + 1), 30000); return () => clearInterval(id); }, [plan]);
   const [lvIn, setLvIn] = useState(""); // price-level alert input
 
   const tfObj = TFS.find((t) => t.key === tf);
@@ -1100,7 +1252,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
   useEffect(() => {
     let poll = null, dead = false;
     tradesSeenRef.current = 0; lastTradeMsRef.current = 0; tradeTimesRef.current = [];
-    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]);
+    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]); printsRef.current = [];
     const haltId = setInterval(() => {
       const lastT = lastTradeMsRef.current;
       const preRate = tradeTimesRef.current.filter((t) => t >= lastT - 30000 && t <= lastT).length;
@@ -1118,6 +1270,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
         if (onAlert) onAlert(`▶ ${symbol} prints resumed`, "Tape is moving again after the stall");
       }
       setTicks((prev) => [{ p, s, t }, ...prev].slice(0, 40));
+      printsRef.current = [{ p, s, t }, ...printsRef.current].slice(0, 800);
       if (s >= BIG_PRINT) setBigTicks((prev) => [{ p, s, t }, ...prev].slice(0, 80));
       if (feedMode(feed).delayMs) return;
       setBars((prev) => {
@@ -1199,9 +1352,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
   }, [bars, show, daily, g, pm]);
 
   const visLines = calc ? calc.lines.map((l) => ({ ...l, vals: l.vals.slice(vo, vo + vc) })) : [];
-  const pmLines = show.pm && calc && !daily
-    ? [{ price: calc.pmH, kind: "pmh" }, { price: calc.pmL, kind: "pml" }]
-    : [];
+  const pmLines = [
+    ...(show.pm && calc && !daily ? [{ price: calc.pmH, kind: "pmh" }, { price: calc.pmL, kind: "pml" }] : []),
+    ...(plan && planLines ? plan.levels.map((l) => ({ price: l.price, kind: l.kind === "support" ? "sup" : "res", label: l.label })) : []),
+  ];
   const crossRel = crossAbs != null && crossAbs >= vo && crossAbs < vo + vc ? { i: crossAbs - vo } : null;
   const conf = useMemo(() => confluence(bars), [bars]);
 
@@ -1415,6 +1569,46 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
     toastRef.current = setTimeout(() => setToast(null), 2600);
   };
   useEffect(() => () => { if (toastRef.current) clearTimeout(toastRef.current); }, []);
+  const analyze = async (fresh) => {
+    if (planBusy) return;
+    setPlanBusy(true); setPlanErr("");
+    try {
+      const r = await fetch("/plan", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "APCA-API-KEY-ID": (keys.id || "").trim(), "APCA-API-SECRET-KEY": (keys.secret || "").trim(),
+          ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}),
+        },
+        body: JSON.stringify({ symbol, feed: feedMode(feed).delayMs ? "iex" : feed, fresh: !!fresh, news: news ? news.headline : null, float: flt || null, grade: g && g.grade, score: g && g.score }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.plan) throw new Error(j.error || `${r.status} ${r.statusText}`);
+      setPlan(j.plan); setPlanT(j.t || Date.now()); setPlanPx(price);
+      if (j.cached && fresh) say("Plan is under a minute old — showing it", true);
+    } catch (e) { setPlanErr(String(e.message || e)); }
+    setPlanBusy(false);
+  };
+  const planText = () => {
+    if (!plan) return "";
+    const L = (v) => "$" + fp(v);
+    const lines = [`${symbol} trade plan — ${plan.bias.toUpperCase()} · ${ftime(planT)} ET at ${L(planPx)}`, plan.summary, ""];
+    lines.push("Levels:");
+    for (const l of [...plan.levels].reverse()) lines.push(`  ${l.kind === "support" ? "S" : "R"} ${L(l.price)} · ${l.label} (${l.strength}/3)`);
+    if (plan.must_hold != null) lines.push(`Must hold ${L(plan.must_hold)} · must fail ${plan.must_fail != null ? L(plan.must_fail) : "—"}`);
+    for (const sc of plan.scenarios) {
+      lines.push("", `${sc.name} (${sc.stance}): ${sc.trigger}`);
+      if (sc.stance === "long") lines.push(`  entry ${sc.entry_lo != null ? L(sc.entry_lo) + "–" + L(sc.entry_hi) : "—"} · stop ${sc.stop != null ? L(sc.stop) : "—"} · targets ${sc.targets.map(L).join(" → ") || "—"}`);
+      if (sc.invalidation) lines.push(`  invalid if: ${sc.invalidation}`);
+      if (sc.note) lines.push(`  ${sc.note}`);
+    }
+    lines.push("", plan.risk_notes, "AI-generated · not financial advice");
+    return lines.join("\n");
+  };
+  const copyPlan = async () => {
+    try { await navigator.clipboard.writeText(planText()); say("Plan copied"); }
+    catch (e) { say("Couldn't copy the plan", false); }
+  };
   const saveShot = async () => {
     let blob = null;
     try { blob = buildShot(); } catch (e) {}
@@ -1456,18 +1650,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
 
   const sidebar = (
     <>
-      {quote && (
-        <div style={{ padding: "6px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 11 }}>
-          <div style={{ fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 3 }}>Book · NBBO top of book</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ color: C.up }}>BID {fp(quote.bp)}<span style={{ color: C.dim }}> ×{(quote.bs || 0) * 100}</span></span>
-            <span style={{ color: C.down }}>ASK {fp(quote.ap)}<span style={{ color: C.dim }}> ×{(quote.as || 0) * 100}</span></span>
-            <span style={{ color: sprPct == null ? C.dim : sprPct < 0.3 ? C.up : sprPct < 1 ? C.amber : C.down }}>
-              SPR {spr != null ? fp(spr) : "—"}{sprPct != null ? ` (${sprPct.toFixed(2)}%)` : ""}
-            </span>
-          </div>
-        </div>
-      )}
+      <Level2 quote={quote} prints={printsRef.current} />
       <div style={{ padding: "8px 12px", fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 8 }}>
         <span>Time & sales</span>
         <span style={{ color: C.amber, textTransform: "none" }}>■ {fv(BIG_PRINT)}+ prints</span>
@@ -1656,6 +1839,91 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, onTogglePref, o
               <StatCell label="EMA 50" value={calc ? fp(calc.e50Now) : "—"} color={C.ema50} />
             </div>
           </div>
+          {/* AI trade plan — support/resistance + three long-only scenarios, on demand */}
+          {plans && (() => {
+            const ageMin = plan ? Math.max(0, Math.round((Date.now() - planT) / 60000)) : 0;
+            const drift = plan && planPx && price ? ((price - planPx) / planPx) * 100 : 0;
+            const biasCol = !plan ? C.dim : plan.bias === "bullish" ? C.up : plan.bias === "bearish" ? C.down : C.amber;
+            const L = (v) => (v == null ? "—" : "$" + fp(v));
+            const sBtn = { background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, height: 28, padding: "0 9px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", touchAction: "manipulation" };
+            return (
+              <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
+                  <span style={{ fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO, whiteSpace: "nowrap" }}>AI trade plan</span>
+                  {plan && <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim, whiteSpace: "nowrap" }}>{ageMin < 1 ? "just now" : `${ageMin}m ago`}</span>}
+                  <div style={{ flex: 1 }} />
+                  {plan && <button onClick={() => setPlanLines((v) => !v)} aria-label="toggle plan levels on chart" style={{ ...sBtn, color: planLines ? C.amber : C.muted, borderColor: planLines ? C.amber + "66" : C.border }}>levels {planLines ? "on" : "off"}</button>}
+                  {plan && <button onClick={copyPlan} aria-label="copy plan" style={sBtn}><CopyIcon /></button>}
+                  <button onClick={() => analyze(!!plan)} disabled={planBusy} aria-label={plan ? "refresh plan" : "analyze"}
+                    style={{ ...sBtn, background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, fontWeight: 700, opacity: planBusy ? 0.6 : 1 }}>
+                    {planBusy ? "Analyzing…" : plan ? "↻ Refresh" : "✦ Analyze"}
+                  </button>
+                </div>
+                {!plan && !planBusy && !planErr && (
+                  <div style={{ padding: "10px 12px", color: C.dim, fontSize: 11, lineHeight: 1.5 }}>
+                    Support and resistance from today's tape, plus three long-only ways to trade it. Nothing is sent until you tap Analyze.
+                  </div>
+                )}
+                {planBusy && !plan && <div style={{ padding: "10px 12px", color: C.amber, fontSize: 11, fontFamily: MONO }}>Reading the tape — this takes a few seconds…</div>}
+                {planErr && <div style={{ padding: "8px 12px", color: C.down, fontSize: 11, fontFamily: MONO }}>✕ {planErr}</div>}
+                {plan && (
+                  <>
+                    {Math.abs(drift) >= 8 && (
+                      <div style={{ padding: "6px 12px", background: C.amber + "12", color: C.amber, fontSize: 10, fontFamily: MONO, borderBottom: `1px solid ${C.border}` }}>
+                        price has moved {drift >= 0 ? "+" : ""}{drift.toFixed(1)}% since this plan — refresh before acting on it
+                      </div>
+                    )}
+                    <div style={{ padding: "10px 12px 6px", display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 800, letterSpacing: 1, color: biasCol, border: `1px solid ${biasCol}66`, borderRadius: 4, padding: "2px 6px", flexShrink: 0, textTransform: "uppercase" }}>{plan.bias}</span>
+                      <div style={{ fontSize: 12, lineHeight: 1.5, color: C.text }}>{plan.summary}</div>
+                    </div>
+                    <div style={{ padding: "4px 12px 2px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>Levels · tap one to set a price alert</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "4px 12px 10px" }}>
+                      {[...plan.levels].reverse().map((l, i) => (
+                        <button key={i} onClick={() => { if (onSetLevels) { onSetLevels(symbol, [...new Set([...((prefs && prefs.lv) || []), +l.price.toFixed(4)])].sort((a, b) => a - b).slice(0, 15)); say(`Alert at $${fp(l.price)} set`); } }}
+                          title={l.label}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, background: (l.kind === "support" ? C.up : C.down) + "12", border: `1px solid ${(l.kind === "support" ? C.up : C.down)}55`, borderRadius: 6, padding: "5px 8px", fontFamily: MONO, fontSize: 10, color: l.kind === "support" ? C.up : C.down, cursor: "pointer", touchAction: "manipulation" }}>
+                          <span style={{ fontWeight: 800 }}>{l.kind === "support" ? "S" : "R"} ${fp(l.price)}</span>
+                          <span style={{ color: C.muted, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.label}</span>
+                          <span style={{ color: C.dim, letterSpacing: 1 }}>{"●".repeat(l.strength)}{"○".repeat(3 - l.strength)}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {(plan.must_hold != null || plan.must_fail != null) && (
+                      <div style={{ display: "flex", gap: 14, padding: "0 12px 10px", fontFamily: MONO, fontSize: 10 }}>
+                        <span><span style={{ color: C.dim }}>MUST HOLD </span><span style={{ color: C.up, fontWeight: 800 }}>{L(plan.must_hold)}</span></span>
+                        <span><span style={{ color: C.dim }}>MUST FAIL </span><span style={{ color: C.down, fontWeight: 800 }}>{L(plan.must_fail)}</span></span>
+                      </div>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "repeat(3, 1fr)", gap: 8, padding: "0 12px 10px" }}>
+                      {plan.scenarios.map((sc) => (
+                        <div key={sc.name} style={{ background: C.panel2, border: `1px solid ${sc.stance === "long" ? C.up + "33" : C.border}`, borderRadius: 8, padding: "9px 10px", display: "flex", flexDirection: "column", gap: 5 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 12, fontWeight: 800 }}>{sc.name}</span>
+                            <span style={{ fontFamily: MONO, fontSize: 8, fontWeight: 800, color: sc.stance === "long" ? C.up : C.dim, background: (sc.stance === "long" ? C.up : C.dim) + "1C", borderRadius: 3, padding: "1px 5px" }}>{sc.stance === "long" ? "LONG" : "WAIT"}</span>
+                          </div>
+                          <div style={{ fontSize: 11, color: C.text, lineHeight: 1.45 }}>{sc.trigger}</div>
+                          {sc.stance === "long" && (
+                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "2px 8px", fontFamily: MONO, fontSize: 10 }}>
+                              <span style={{ color: C.dim }}>ENTRY</span><span style={{ color: C.text }}>{sc.entry_lo != null ? `${L(sc.entry_lo)} – ${L(sc.entry_hi)}` : "—"}</span>
+                              <span style={{ color: C.dim }}>STOP</span><span style={{ color: C.down, fontWeight: 700 }}>{L(sc.stop)}</span>
+                              <span style={{ color: C.dim }}>TARGETS</span><span style={{ color: C.up, fontWeight: 700 }}>{sc.targets.length ? sc.targets.map(L).join(" → ") : "—"}</span>
+                            </div>
+                          )}
+                          {sc.invalidation && <div style={{ fontSize: 10, color: C.muted, lineHeight: 1.4 }}><span style={{ color: C.down, fontFamily: MONO, fontSize: 8, letterSpacing: 1 }}>INVALID IF </span>{sc.invalidation}</div>}
+                          {sc.note && <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.4 }}>{sc.note}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    {plan.risk_notes && <div style={{ padding: "0 12px 8px", fontSize: 10, color: C.muted, lineHeight: 1.45 }}>{plan.risk_notes}</div>}
+                    <div style={{ padding: "6px 12px 10px", borderTop: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 8, letterSpacing: 0.8, color: C.dim, textTransform: "uppercase" }}>
+                      AI-generated · not financial advice · built {ftime(planT)} ET at ${fp(planPx)} · {plan.model || "model"}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {/* confluence tracker */}
           <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -1805,6 +2073,11 @@ export default function App() {
   const [pushArmed, setPushArmed] = useState(false);
   const [alertLog, setAlertLog] = useState([]);
   const [alertCenter, setAlertCenter] = useState(false);
+  const [jStats, setJStats] = useState(null); // push follow-through from the server journal
+  useEffect(() => {
+    if (!alertCenter) return;
+    fetch("/journal").then((r) => r.json()).then((j) => setJStats(j && j.stats ? j.stats : null)).catch(() => {});
+  }, [alertCenter]);
   const [bannerX, setBannerX] = useState(0);
   const bannerTouchRef = useRef(null);
   const [pushWarn, setPushWarn] = useState(false);
@@ -2948,6 +3221,11 @@ export default function App() {
               <button onClick={() => setAlertLog([])} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "5px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>Clear all</button>
               <button onClick={() => setAlertCenter(false)} style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "5px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Close</button>
             </div>
+            <div style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
+              {jStats && jStats.n > 0
+                ? <>PUSH FOLLOW-THROUGH · 20D · {jStats.n} pushes · <span style={{ color: jStats.green15 >= 50 ? C.up : C.down }}>{Math.round(jStats.green15)}% green at 15m</span> · avg {jStats.avg15 >= 0 ? "+" : ""}{jStats.avg15.toFixed(1)}% at 15m{jStats.avgMaxUp30 != null ? <> · avg peak +{jStats.avgMaxUp30.toFixed(1)}% within 30m</> : null}</>
+                : <>PUSH FOLLOW-THROUGH · builds after the first confluence pushes land (5 / 15 / 30-minute prices are journaled for every push)</>}
+            </div>
             <div style={{ overflowY: "auto", flex: 1 }}>
               {alertLog.length === 0 && <div style={{ padding: 20, color: C.dim, fontFamily: MONO, fontSize: 12 }}>No alerts yet today.</div>}
               {alertLog.map((a, i) => (
@@ -3033,6 +3311,7 @@ export default function App() {
           symbol={sel.symbol}
           keys={keys}
           feed={feed}
+          plans={!!(srvCfg && srvCfg.plans)}
           g={sel}
           pm={pmMap[sel.symbol]}
           news={newsMap[sel.symbol]}
