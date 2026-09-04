@@ -1,7 +1,7 @@
 # Momentum Scanner — Agent Handoff
 
 Operating manual for an AI agent taking over development. Written 2026-09-04,
-current as of commit `6d6737c`.
+current as of commit `81b0d64`.
 
 Owner: Corey Putney. Repo: `putneyc11/Momentum-scanner`.
 
@@ -290,25 +290,25 @@ fetches `/v2/stocks/trades/latest` for every watchlist symbol every 3 seconds
 and **discards the `t` field**, keeping only `p`. A stock that printed 20
 seconds ago cannot be halted.
 
-### 8.2 `priceTick` swallows every error
+### 8.2 Feed failures were silent — FIXED 2026-09-04
 
-`priceTick` has a bare `catch (e) {}` (`src/momentum-dashboard.jsx:2999`) and
-never calls `setErr`. When the live
-price feed dies, rows silently fall back to the daily-bar close from the last
-slow discovery scan. Prices look wrong and frozen with no error on screen, and
-a dead feed is indistinguishable from a quiet tape.
+`priceTick` and the Advanced view's tape poll used to swallow every
+error, so a dead feed looked identical to a quiet tape. Both now record
+last success and last failure. The watchlist shows a red FEED DOWN strip
+after 8s of failed ticks or 30s without a success, with the status code,
+Alpaca's message, and a recovery hint keyed to the failure (403/
+subscription, 401 device claim, 429, 5xx, no response). The chart overlay
+reads FEED DOWN and Time & Sales names the error. `feedFailure()` in the
+JSX is the shared parser. test26 covers both views with the production
+403.
 
-Compare: `refresh` does call `setErr`, so discovery failures show the red
-banner. Suggested fix: track the last successful tick and show a stale-data
-warning in the header when no fresh print has landed in 30 seconds.
+### 8.3 Delayed-feed mode looks like a broken app — mitigated
 
-### 8.3 Delayed-feed mode looks like a broken app
-
-`FEED_MODES.sip_delayed` pulls bars with `end` set 16 minutes back **and**
-routes last-trade lookups to `iex`. IEX carries a thin slice of small-cap
-volume, so prices land wrong and barely move. Combined with 8.2 there is no
-error shown. The header pill is the only tell: `SIP RT` vs `SIP 15m-delay`.
-Worth making that difference much louder.
+`FEED_MODES.sip_delayed` pulls bars 16 minutes back and routes last-trade
+lookups to `iex`, so prices lag and barely move. The header pill still
+only says `SIP 15m-delay`; a real 403 on a SIP request is now surfaced by
+8.2, but a *working* delayed feed is still easy to mistake for a dead
+one. Worth a louder mode indicator.
 
 ### 8.4 Halt/LULD are heuristics
 
