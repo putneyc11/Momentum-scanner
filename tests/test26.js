@@ -184,11 +184,25 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.waitForTimeout(300);
   console.log(!b1.includes('Advanced view') ? '✓ no intermediate preview step' : '✗ preview card leaked into the flow');
 
+  // FEED DOWN: Alpaca refuses recent SIP data (the exact failure seen in production).
+  // Re-registering a route overrides the earlier mock.
+  const deny = (r) => r.fulfill({ status: 403, json: { message: 'subscription does not permit querying recent SIP data' } });
+  await page.route('**/alpaca/v2/stocks/*/trades/latest**', deny);
+  await page.route('**/alpaca/v2/stocks/*/quotes/latest**', deny);
+  await page.waitForTimeout(5500);
+  const fdAdv = await page.evaluate(() => { const t = document.querySelector('#root').textContent; return { flag: t.includes('● FEED DOWN'), why: t.includes('subscription does not permit querying recent SIP data'), hint: t.includes('Check the market-data subscription') }; });
+  console.log(fdAdv.flag && fdAdv.why && fdAdv.hint ? '✓ Advanced view flags FEED DOWN on the chart, names the 403 and the recovery' : '✗ tape failure hidden: ' + JSON.stringify(fdAdv));
   // back button returns to the list
   await page.click('button:has-text("←")');
   await page.waitForTimeout(500);
   const b2 = await page.textContent('#root');
   console.log(!b2.includes('Confluence tracker') && b2.includes('GOODA') ? '✓ back button returns to the watchlist' : '✗ back navigation broken');
+  await page.route('**/alpaca/v2/stocks/trades/latest**', deny);
+  await page.waitForTimeout(12500); // > 8s of failed 3s ticks
+  const fdHome = await page.evaluate(() => { const t = document.querySelector('#root').textContent; return { strip: t.includes('FEED DOWN · PRICES ARE NOT UPDATING'), why: t.includes('403 · subscription does not permit'), hint: t.includes('Check the market-data subscription') }; });
+  console.log(fdHome.strip && fdHome.why && fdHome.hint ? '✓ watchlist shows a FEED DOWN strip with the 403 and the recovery once ticks fail for 8s' : '✗ dead feed still silent on the watchlist: ' + JSON.stringify(fdHome));
+  const oneBlip = await page.evaluate(() => document.querySelector('#root').textContent.includes('no successful price update'));
+  console.log(!oneBlip ? '✓ with a real error the strip shows the error, not a bare age counter' : '✗ strip text wrong');
   console.log('JS errors:', errors.length ? errors : 'none');
   await browser.close();
   process.exit(errors.length ? 1 : 0);
