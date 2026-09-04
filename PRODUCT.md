@@ -111,37 +111,3 @@ requires per-user real-time display entitlements to function.
   Sign in with Apple / Google and App Store billing land with the native
   shell (Phase 2). Nothing in the app is feature-gated by plan yet — the
   comparison table is the promise, per the Option B business goal above.
-
-## Lock-screen push policy (confluence, not events)
-
-- A push fires only when at least three of five signals line up on the same
-  1-minute bar: above VWAP, EMA 8 > 21, volume ≥ 2× the 10-minute average AND
-  ≥ $50k notional, fresh high of day (or PMH break after the open), three
-  green candles. Tier 2 "setup" = three; tier 3 "breakout" = four including
-  HOD and volume. 11:30–14:00 ET needs one more signal per tier.
-- First observation of a symbol is a silent baseline. A symbol re-pushes only
-  when it escalates to a higher tier or starts a fresh leg (≥ 8% pullback,
-  then a 3% bounce with confluence, ≥ 20 min after the last push).
-- Caps: 3 pushes per symbol per day, 6 per hour feed-wide; overflow rolls
-  into one digest push per 15 minutes. Halts and user-set price levels still
-  push directly. `LEGACY_PUSH=1` restores single-event pushes.
-- Every push is journaled with the price 5 / 15 / 30 minutes later and the
-  best/worst print in that window (`/journal`); the alert center shows the
-  running hit rate. Thresholds get tuned against that, not by feel.
-
-## AI trade plans (Advanced view)
-
-- On demand only (Analyze button), cached 5 minutes per symbol, refresh
-  rate-limited to once a minute. The server computes a level pack from the
-  tape (PMH/PML, HOD/LOD, VWAP, EMA 8/21/50, LULD estimate, opening range,
-  volume nodes, 5-minute pivots, prior-day levels, recent candles, signals)
-  and the model may only anchor levels to those numbers; every returned
-  price is range-checked against the live price.
-- Long-only by decision: "Long continuation", "Dip buy", "Stand aside", plus
-  must-hold / must-fail. Level chips add price-cross alerts; levels draw on
-  the chart. Copy exports the plan as text.
-- Model: Claude Opus 5 by decision (`PLAN_MODEL` env; `PLAN_EFFORT`
-  defaults to medium), raw Messages API with JSON-schema structured output,
-  server-side refusal fallbacks and a cached system prompt. Requires
-  `ANTHROPIC_API_KEY` in Render; without it the card is hidden. Framed as
-  generated text, never advice — About page carries the disclosure.

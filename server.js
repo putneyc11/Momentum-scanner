@@ -23,18 +23,6 @@ const PORT = process.env.PORT || 8787;
 const DATA = process.env.ALPACA_DATA_URL || "https://data.alpaca.markets";
 const TRADING = process.env.ALPACA_TRADING_URL || "https://paper-api.alpaca.markets";
 const ROUTES = { "/alpaca": DATA, "/trading": TRADING };
-/* ---- confluence push policy (see computeSetup) ---- */
-const LEGACY_PUSH = process.env.LEGACY_PUSH === "1";           // 1 = every single trigger pushes (old behaviour)
-const PUSH_HOURLY_CAP = Number(process.env.PUSH_HOURLY_CAP || 6);
-const PUSH_SYM_DAILY_CAP = Number(process.env.PUSH_SYM_DAILY_CAP || 3);
-const MIN_PUSH_PRICE = Number(process.env.MIN_PUSH_PRICE || 0.5);
-const JOURNAL_FILE = "/tmp/scanner-journal.json";
-/* ---- AI trade plans ---- */
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-const ANTHROPIC_URL = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/$/, "");
-const PLAN_MODEL = process.env.PLAN_MODEL || "claude-opus-5";
-const PLAN_EFFORT = process.env.PLAN_EFFORT || "medium";
-const PLAN_TTL_MS = 5 * 60000;
 const SUBS_FILE = "/tmp/scanner-subs.json";
 const DEVICES_FILE = "/tmp/scanner-devices.json";
 
@@ -164,7 +152,7 @@ try {
 function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs })); } catch (e) {} }
 
 /* per-ticker alert-category filtering: the alert key encodes its category */
-const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
+const CAT_MARKS = [["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
 function catOf(key) { for (const [c, m] of CAT_MARKS) if (key.includes(m)) return c; return null; }
 function prefAllows(prefs, sym, key) {
   const p = prefs && prefs[sym];
@@ -368,131 +356,6 @@ function computeTriggers(sym, arr, st, nowMs) {
   return out;
 }
 
-/* ============================ confluence setups ============================
-   Lock-screen pushes no longer fire on single events. A symbol earns a push
-   only when several signals line up on the SAME bar, and only when that is
-   news: a higher tier than the last push, or a fresh leg after a real
-   pullback. Per-symbol daily cap + global hourly cap; overflow rolls into
-   one digest. Pure functions, unit-tested (tests/test-setup.js). */
-const SIG_LABEL = { vwap: "VWAP", ema: "EMA 8>21", vol: "vol", hod: "HOD", mom3: "3 green" };
-function setupSignals(arr, nowMs) {
-  if (!arr || arr.length < 8) return null;
-  const last = arr[arr.length - 1];
-  const closes = arr.map((b) => b.c);
-  let pv = 0, vv = 0;
-  for (const b of arr) { pv += ((b.h + b.l + b.c) / 3) * b.v; vv += b.v; }
-  const vw = vv ? pv / vv : last.c;
-  const ema = (n) => { const k = 2 / (n + 1); let e = null; for (const c of closes) e = e === null ? c : c * k + e * (1 - k); return e; };
-  const prior = arr.slice(-11, -1);
-  const avg10 = prior.reduce((a, b) => a + b.v, 0) / Math.max(1, prior.length);
-  let hodBefore = -Infinity;
-  for (const b of arr.slice(0, -3)) hodBefore = Math.max(hodBefore, b.h);
-  const recentHi = Math.max(...arr.slice(-3).map((b) => b.h));
-  let pmH = null;
-  for (const b of arr) if (etMinutes(b.t) < OPEN_ET_MIN) pmH = pmH == null ? b.h : Math.max(pmH, b.h);
-  const l3 = arr.slice(-3);
-  const volMult = avg10 > 0 ? last.v / avg10 : 0;
-  const sig = {
-    vwap: last.c > vw,
-    ema: ema(8) > ema(21),
-    vol: volMult >= 2 && last.c * last.v >= 50000,          /* dollar floor, not a share floor */
-    hod: (arr.length > 3 && recentHi > hodBefore) || (pmH != null && etMinutes(last.t) >= OPEN_ET_MIN && last.c > pmH),
-    mom3: l3.length === 3 && l3.every((b) => b.c > b.o),
-  };
-  const n = Object.values(sig).filter(Boolean).length;
-  return { sig, n, price: last.c, vwap: vw, volMult, fresh: nowMs - last.t < 120000, hod: Math.max(hodBefore, recentHi), t: last.t };
-}
-/* 11:30–14:00 ET is chop: one more signal required for every tier */
-function tierOf(n, sig, etMin) {
-  const lunch = etMin >= 690 && etMin < 840;
-  const need2 = lunch ? 4 : 3, need3 = lunch ? 5 : 4;
-  if (n >= need3 && sig.hod && sig.vol) return 3;
-  if (n >= need2) return 2;
-  if (n >= 2) return 1;
-  return 0;
-}
-/* Decide whether THIS observation earns a push. Mutates st (persisted). */
-function setupGate(sym, arr, st, nowMs, opts) {
-  const o = opts || {};
-  const s = setupSignals(arr, nowMs);
-  if (!s) return null;
-  const day = etDay(nowMs);
-  if (st.setupDay !== day) { st.setupDay = day; st.pushes = 0; st.tier = 0; st.legHi = s.price; st.pbLo = s.price; st.lastPush = 0; st.setupInit = false; }
-  const etMin = etMinutes(s.t);
-  const tier = tierOf(s.n, s.sig, etMin);
-  if (s.price > (st.legHi || 0)) st.legHi = s.price;
-  if (st.pbLo == null || s.price < st.pbLo) st.pbLo = s.price;
-  if (!st.setupInit) { st.setupInit = true; st.tier = tier; return null; } /* baseline: never replay what already happened */
-  if (!s.fresh || tier < 2 || s.price < (o.minPrice != null ? o.minPrice : MIN_PUSH_PRICE)) return null;
-  const newLeg = st.tier > 0 && st.pbLo <= st.legHi * 0.92 && s.price >= st.pbLo * 1.03 && nowMs - (st.lastPush || 0) > 20 * 60000;
-  const escalates = tier > st.tier;
-  if (!escalates && !newLeg) return null;
-  if ((st.pushes || 0) >= (o.dailyCap != null ? o.dailyCap : PUSH_SYM_DAILY_CAP)) return null;
-  st.tier = tier; st.pushes = (st.pushes || 0) + 1; st.lastPush = nowMs; st.legHi = s.price; st.pbLo = s.price;
-  const on = Object.keys(s.sig).filter((k) => s.sig[k]).map((k) => (k === "vol" ? `vol ${s.volMult.toFixed(1)}×` : SIG_LABEL[k]));
-  const title = tier === 3 ? `🚀 ${sym} breakout ${s.n}/5` : `⚡ ${sym} setup ${s.n}/5`;
-  const body = `${on.join(" · ")}${newLeg ? " · new leg" : ""} @ $${fp(s.price)}`;
-  return { tier, n: s.n, sig: s.sig, price: s.price, newLeg, title, body };
-}
-
-/* ============================ push journal ============================
-   Every lock-screen push is recorded with the price 5 / 15 / 30 minutes
-   later and the best/worst print in that window — the evidence that tunes
-   the tiers. Filled from the same session bars the monitor already holds. */
-let journal = [];
-try { journal = JSON.parse(fs.readFileSync(JOURNAL_FILE, "utf8")) || []; } catch (e) {}
-function saveJournal() { try { fs.writeFileSync(JOURNAL_FILE, JSON.stringify(journal.slice(-600))); } catch (e) {} }
-function journalAdd(e) { journal.push(e); if (journal.length > 600) journal = journal.slice(-600); }
-function journalUpdate(sym, arr) {
-  for (const e of journal) {
-    if (e.sym !== sym || e.done) continue;
-    const after = arr.filter((b) => b.t >= e.t);
-    if (!after.length) continue;
-    const at = (m) => { const b = after.find((x) => x.t >= e.t + m * 60000); return b ? b.c : null; };
-    if (e.p5 == null) e.p5 = at(5);
-    if (e.p15 == null) e.p15 = at(15);
-    if (e.p30 == null) e.p30 = at(30);
-    const win = after.filter((b) => b.t <= e.t + 30 * 60000);
-    if (win.length) {
-      e.hi30 = Math.max(e.hi30 != null ? e.hi30 : -Infinity, ...win.map((b) => b.h));
-      e.lo30 = Math.min(e.lo30 != null ? e.lo30 : Infinity, ...win.map((b) => b.l));
-    }
-    if (e.p30 != null) e.done = true;
-  }
-}
-function journalStats(days, rows0) {
-  const since = Date.now() - (days || 20) * 864e5;
-  const rows = (rows0 || journal).filter((e) => e.t >= since && e.p15 != null && e.price > 0);
-  const pct = (a, b) => ((b - a) / a) * 100;
-  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
-  const block = (rs) => {
-    const n = rs.length;
-    if (!n) return { n: 0 };
-    const r15 = rs.map((e) => pct(e.price, e.p15));
-    const r30 = rs.filter((e) => e.p30 != null).map((e) => pct(e.price, e.p30));
-    const up = rs.filter((e) => e.hi30 != null).map((e) => pct(e.price, e.hi30));
-    const dn = rs.filter((e) => e.lo30 != null).map((e) => pct(e.price, e.lo30));
-    return { n, green15: (r15.filter((x) => x > 0).length / n) * 100, avg15: avg(r15), avg30: avg(r30), avgMaxUp30: avg(up), avgMaxDn30: avg(dn) };
-  };
-  return { ...block(rows), tier2: block(rows.filter((e) => e.tier === 2)), tier3: block(rows.filter((e) => e.tier === 3)), legacy: block(rows.filter((e) => !e.tier)) };
-}
-/* overflow setups → ONE digest per 15 min, routed by interest like alerts */
-async function sendDigest(items) {
-  const key = `digest-setup-${Math.floor(Date.now() / 9e5)}`;
-  const line = (arr) => arr.map((i) => `${i.sym} ${i.tier === 3 ? "breakout" : "setup"} $${fp(i.price)}`).join(" · ");
-  const mine = items.filter((i) => watch.includes(i.sym) && prefAllows(watchPrefs, i.sym, key));
-  if (mine.length) await broadcast(`📋 ${mine.length} more setup${mine.length > 1 ? "s" : ""}`, line(mine), key);
-  let changed = false;
-  for (const d of Object.values(devices)) {
-    if (!d.sub) continue;
-    const m = items.filter((i) => (d.symbols || []).includes(i.sym) && prefAllows(d.prefs, i.sym, key));
-    if (!m.length) continue;
-    const code = await sendPush(d.sub, { title: `📋 ${m.length} more setup${m.length > 1 ? "s" : ""}`, body: line(m), key });
-    if (code === 404 || code === 410) { d.sub = null; changed = true; }
-  }
-  if (changed) saveDevices();
-}
-
 const MONSTATE_FILE = "/tmp/scanner-monstate.json";
 const monState = { fired: new Set(), sym: {}, day: null };
 try {
@@ -527,7 +390,11 @@ async function monitorTick() {
     /* monitor covers the shared list plus every claimed device's list */
     const pool = (SERVER_KEYS ? watchUnion() : watch).slice(0, SERVER_KEYS ? 80 : 40);
     if (pool.length === 0) return;
-    const start = sessionStartISO(); /* full premarket window — PMH and baselines track from the 4:00 AM open */
+    const off = new Date();
+    const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const diff = off.getTime() - et.getTime();
+    const d = new Date(et); d.setHours(4, 0, 0, 0); /* full premarket window — PMH and baselines track from the 4:00 AM open */
+    const start = new Date(d.getTime() + diff).toISOString();
     const nowMs = Date.now();
     for (let i = 0; i < pool.length; i += 15) {
       const batch = pool.slice(i, i + 15);
@@ -538,34 +405,12 @@ async function monitorTick() {
       for (const s of batch) {
         const arr = ((j.bars && j.bars[s]) || []).map((b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
         const st = monState.sym[s] || (monState.sym[s] = {});
-        const px = arr.length ? arr[arr.length - 1].c : null;
         for (const trig of computeTriggers(s, arr, st, nowMs)) {
           if (monState.fired.has(trig.key)) continue;
-          /* single-condition triggers only push in legacy mode; halts always do */
-          const cat = catOf(trig.key);
-          if (!LEGACY_PUSH && cat !== "halt") continue;
           monState.fired.add(trig.key);
           console.log("PUSH:", trig.title);
           await sendAlert(s, trig.title, trig.body, trig.key);
-          if (cat !== "halt") journalAdd({ t: nowMs, sym: s, tier: 0, kind: cat, price: px });
         }
-        if (!LEGACY_PUSH) {
-          const hit = setupGate(s, arr, st, nowMs);
-          if (hit) {
-            const hourKey = Math.floor(nowMs / 36e5);
-            if (monState.hour !== hourKey) { monState.hour = hourKey; monState.hourN = 0; }
-            if (monState.hourN >= PUSH_HOURLY_CAP) {
-              monState.digest = (monState.digest || []).concat([{ sym: s, tier: hit.tier, price: hit.price }]);
-              console.log("DIGEST:", hit.title);
-            } else {
-              monState.hourN++;
-              console.log("PUSH:", hit.title, "—", hit.body);
-              await sendAlert(s, hit.title, hit.body, `${s}-setup-${hit.tier}-${Math.floor(nowMs / 6e4)}`);
-            }
-            journalAdd({ t: nowMs, sym: s, tier: hit.tier, kind: "setup", sig: Object.keys(hit.sig).filter((k) => hit.sig[k]), price: hit.price, digest: monState.hourN >= PUSH_HOURLY_CAP });
-          }
-        }
-        journalUpdate(s, arr);
         /* user-set price-cross levels on this symbol */
         if (arr.length >= 2) {
           const c1 = arr[arr.length - 2].c, c2 = arr[arr.length - 1].c;
@@ -580,13 +425,8 @@ async function monitorTick() {
         }
       }
     }
-    if ((monState.digest || []).length && nowMs - (monState.digestAt || 0) > 15 * 60000) {
-      const items = monState.digest; monState.digest = []; monState.digestAt = nowMs;
-      await sendDigest(items);
-    }
   } catch (e) { console.log("monitor error:", String(e).slice(0, 120)); }
   saveMonState();
-  saveJournal();
 }
 const monitorTimer = setInterval(monitorTick, 45000);
 /* Render rolling deploys briefly run OLD + NEW instances together; the old
@@ -596,191 +436,6 @@ process.on("SIGTERM", () => {
   try { saveMonState(); saveSubs(); } catch (e) {}
   process.exit(0);
 });
-
-/* 04:00 ET today, as ISO — the session every level is measured from */
-function sessionStartISO(daysBack) {
-  const off = new Date();
-  const et = new Date(off.toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const diff = off.getTime() - et.getTime();
-  const d = new Date(et); d.setHours(4, 0, 0, 0);
-  return new Date(d.getTime() + diff - (daysBack || 0) * 864e5).toISOString();
-}
-
-/* ============================ AI trade plans ============================
-   POST /plan {symbol} → support / resistance + three long-only scenarios.
-   The server builds a LEVEL PACK from the tape (numbers the model may use)
-   and asks the model for a JSON plan under a strict schema; every number
-   it returns is then range-checked against the live price. Cached per
-   symbol for 5 minutes. Raw Messages API over fetch — this server ships
-   with no npm install step. */
-const planCache = {}; // sym -> { t, plan }
-const PLAN_SCHEMA = {
-  type: "object", additionalProperties: false,
-  required: ["bias", "summary", "levels", "scenarios", "must_hold", "must_fail", "risk_notes"],
-  properties: {
-    bias: { type: "string", enum: ["bullish", "neutral", "bearish"] },
-    summary: { type: "string" },
-    levels: { type: "array", items: { type: "object", additionalProperties: false, required: ["price", "kind", "label", "strength"],
-      properties: { price: { type: "number" }, kind: { type: "string", enum: ["support", "resistance"] }, label: { type: "string" }, strength: { type: "integer" } } } },
-    scenarios: { type: "array", items: { type: "object", additionalProperties: false,
-      required: ["name", "stance", "trigger", "entry_lo", "entry_hi", "stop", "targets", "invalidation", "note"],
-      properties: { name: { type: "string" }, stance: { type: "string", enum: ["long", "wait"] }, trigger: { type: "string" },
-        entry_lo: { type: "number" }, entry_hi: { type: "number" }, stop: { type: "number" }, targets: { type: "array", items: { type: "number" } },
-        invalidation: { type: "string" }, note: { type: "string" } } } },
-    must_hold: { type: "number" }, must_fail: { type: "number" }, risk_notes: { type: "string" },
-  },
-};
-const PLAN_SYSTEM = `You plan intraday trades in small-cap momentum stocks for a retail trader who can only go long (Robinhood, no shorting). You are given a LEVEL PACK computed from today's tape: price, prior close, premarket high/low, high/low of day, VWAP, EMA 8/21/50, estimated LULD halt bands, opening range, volume profile nodes, swing pivots, prior-day levels, the last few 5-minute candles, and which momentum signals are on.
-
-Write a plan as JSON matching the schema you are given.
-
-Levels: pick 4 to 8 support/resistance prices, each anchored to something in the pack (PMH, HOD, VWAP, an EMA, a pivot, a volume node, prior-day high, LULD band, a round number the tape respected). Label each one with its anchor and rate strength 1 to 3 by how many anchors agree. Do not invent prices the pack does not support.
-
-Scenarios: exactly three, in this order and with these names: "Long continuation" (stance long: price holds above a must-hold level and pushes through resistance), "Dip buy" (stance long: a pullback into support that holds), "Stand aside" (stance wait: what has to happen before there is no trade, with the level that would re-open one). For long scenarios the entry zone must sit above the stop and every target must sit above the entry zone; give 1 to 3 targets from the resistance ladder; name the invalidation as a price behaviour, not a feeling. For "Stand aside" set entry_lo, entry_hi, stop and targets to 0.
-
-must_hold is the single price bulls must keep; must_fail is the price whose loss ends the long thesis for the session.
-
-Keep summary under 60 words in plain trader language: what the tape is doing, what the best trade is, what kills it. risk_notes: two or three short sentences on sizing, halts, spreads and chasing. Mind the session: before 09:30 ET the open can gap either way; between 11:30 and 14:00 momentum is unreliable. If the pack has fewer than 20 bars, say the read is thin and keep the scenarios conservative. Never present this as advice.`;
-
-const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
-function sanitizePlan(plan, price) {
-  const lo = price * 0.3, hi = price * 3;
-  const inRange = (v) => num(v) != null && v >= lo && v <= hi;
-  const str = (v, n) => String(v == null ? "" : v).slice(0, n || 300);
-  const levels = (Array.isArray(plan.levels) ? plan.levels : [])
-    .filter((l) => l && inRange(l.price) && (l.kind === "support" || l.kind === "resistance"))
-    .map((l) => ({ price: +(+l.price).toFixed(4), kind: l.kind, label: str(l.label, 40), strength: Math.max(1, Math.min(3, Math.round(num(l.strength) || 1))) }))
-    .sort((a, b) => a.price - b.price).slice(0, 8);
-  const names = ["Long continuation", "Dip buy", "Stand aside"];
-  const scenarios = names.map((name, i) => {
-    const sc = (Array.isArray(plan.scenarios) ? plan.scenarios : [])[i] || {};
-    const stance = i === 2 ? "wait" : "long";
-    let entry_lo = num(sc.entry_lo), entry_hi = num(sc.entry_hi), stop = num(sc.stop);
-    let targets = (Array.isArray(sc.targets) ? sc.targets : []).map(num).filter((v) => v != null);
-    if (stance === "long") {
-      if (!inRange(entry_lo) || !inRange(entry_hi)) { entry_lo = entry_hi = null; }
-      if (entry_lo != null && entry_lo > entry_hi) { const t = entry_lo; entry_lo = entry_hi; entry_hi = t; }
-      if (!inRange(stop) || (entry_lo != null && stop >= entry_lo)) stop = null;
-      targets = targets.filter((v) => inRange(v) && (entry_hi == null || v > entry_hi)).sort((a, b) => a - b).slice(0, 3);
-    } else { entry_lo = entry_hi = stop = 0; targets = []; }
-    return { name, stance, trigger: str(sc.trigger), entry_lo, entry_hi, stop, targets, invalidation: str(sc.invalidation), note: str(sc.note) };
-  });
-  return {
-    bias: ["bullish", "neutral", "bearish"].includes(plan.bias) ? plan.bias : "neutral",
-    summary: str(plan.summary, 600), levels, scenarios,
-    must_hold: inRange(plan.must_hold) ? plan.must_hold : null, must_fail: inRange(plan.must_fail) ? plan.must_fail : null,
-    risk_notes: str(plan.risk_notes, 600),
-  };
-}
-
-function pivots(bars5, price) {
-  /* swing highs/lows on 5-min candles (2 bars each side), clustered within 1.5% */
-  const out = [];
-  for (let i = 2; i < bars5.length - 2; i++) {
-    const b = bars5[i];
-    if (b.h > bars5[i - 1].h && b.h > bars5[i - 2].h && b.h >= bars5[i + 1].h && b.h >= bars5[i + 2].h) out.push({ price: b.h, kind: "high", t: b.t });
-    if (b.l < bars5[i - 1].l && b.l < bars5[i - 2].l && b.l <= bars5[i + 1].l && b.l <= bars5[i + 2].l) out.push({ price: b.l, kind: "low", t: b.t });
-  }
-  const clusters = [];
-  for (const p of out.sort((a, b) => a.price - b.price)) {
-    const c = clusters[clusters.length - 1];
-    if (c && Math.abs(p.price - c.price) / c.price < 0.015) { c.touches++; c.price = (c.price * (c.touches - 1) + p.price) / c.touches; c.kinds.add(p.kind); }
-    else clusters.push({ price: p.price, touches: 1, kinds: new Set([p.kind]) });
-  }
-  return clusters.sort((a, b) => b.touches - a.touches || Math.abs(a.price - price) - Math.abs(b.price - price)).slice(0, 8)
-    .map((c) => ({ price: +c.price.toFixed(4), touches: c.touches, side: c.price >= price ? "above" : "below", kind: [...c.kinds].join("/") }));
-}
-function agg5(arr) {
-  const out = [];
-  for (const b of arr) {
-    const slot = Math.floor(b.t / 3e5) * 3e5;
-    const c = out[out.length - 1];
-    if (c && c.t === slot) { c.h = Math.max(c.h, b.h); c.l = Math.min(c.l, b.l); c.c = b.c; c.v += b.v; }
-    else out.push({ t: slot, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v });
-  }
-  return out;
-}
-async function buildLevelPack(sym, H, feed, extra) {
-  const nowMs = Date.now();
-  const [j1, jd] = await Promise.all([
-    fetchJSON(`${DATA}/v2/stocks/bars?symbols=${sym}&timeframe=1Min&start=${encodeURIComponent(sessionStartISO())}&limit=10000&feed=${feed}`, H),
-    fetchJSON(`${DATA}/v2/stocks/bars?symbols=${sym}&timeframe=1Day&start=${encodeURIComponent(sessionStartISO(20))}&limit=30&adjustment=split&feed=${feed}`, H).catch(() => null),
-  ]);
-  const arr = ((j1.bars && j1.bars[sym]) || []).map((b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
-  if (arr.length < 3) throw new Error("not enough tape for " + sym + " today");
-  const daily = ((jd && jd.bars && jd.bars[sym]) || []).map((b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
-  const today = etDay(nowMs);
-  const prior = daily.filter((b) => etDay(b.t) !== today);
-  const yday = prior[prior.length - 1] || null;
-  const last = arr[arr.length - 1];
-  const price = last.c;
-  const closes = arr.map((b) => b.c);
-  let pv = 0, vv = 0, hi = -Infinity, lo = Infinity, pmH = null, pmL = null, orH = null, orL = null;
-  for (const b of arr) {
-    pv += ((b.h + b.l + b.c) / 3) * b.v; vv += b.v; hi = Math.max(hi, b.h); lo = Math.min(lo, b.l);
-    const m = etMinutes(b.t);
-    if (m < OPEN_ET_MIN) { pmH = pmH == null ? b.h : Math.max(pmH, b.h); pmL = pmL == null ? b.l : Math.min(pmL, b.l); }
-    if (m >= OPEN_ET_MIN && m < OPEN_ET_MIN + 5) { orH = orH == null ? b.h : Math.max(orH, b.h); orL = orL == null ? b.l : Math.min(orL, b.l); }
-  }
-  const ema = (n) => { const k = 2 / (n + 1); let e = null; for (const c of closes) e = e === null ? c : c * k + e * (1 - k); return e; };
-  const last5 = arr.slice(-5);
-  const ref = last5.reduce((a, b) => a + b.c, 0) / last5.length;
-  const band = price >= 3 ? 10 : price >= 0.75 ? 20 : 75;
-  const bins = 40, step = (hi - lo) / bins || 1;
-  const prof = new Array(bins).fill(0);
-  for (const b of arr) prof[Math.min(bins - 1, Math.max(0, Math.floor(((b.h + b.l) / 2 - lo) / step)))] += b.v;
-  const nodes = prof.map((v, i) => ({ price: +(lo + (i + 0.5) * step).toFixed(4), vol: v })).sort((a, b) => b.vol - a.vol).slice(0, 3);
-  const bars5 = agg5(arr);
-  const sig = setupSignals(arr, nowMs);
-  const etMin = etMinutes(last.t);
-  const r = (v) => (v == null ? null : +(+v).toFixed(4));
-  const last30 = arr.filter((b) => b.t >= last.t - 30 * 60000);
-  return {
-    symbol: sym, time_et: `${String(Math.floor(etMin / 60)).padStart(2, "0")}:${String(etMin % 60).padStart(2, "0")}`,
-    session: etMin < OPEN_ET_MIN ? "premarket" : etMin < 960 ? "regular" : "after-hours",
-    bars_today: arr.length, price: r(price),
-    prev_close: yday ? r(yday.c) : null, gap_pct: yday ? +(((price - yday.c) / yday.c) * 100).toFixed(1) : null,
-    day_high: r(hi), day_low: r(lo), day_volume: vv,
-    premarket_high: r(pmH), premarket_low: r(pmL), opening_range: orH != null ? { high: r(orH), low: r(orL) } : null,
-    vwap: r(vv ? pv / vv : price), ema8: r(ema(8)), ema21: r(ema(21)), ema50: r(ema(50)),
-    luld_est: { up: r(ref * (1 + band / 100)), down: r(Math.max(0.01, ref * (1 - band / 100))), band_pct: band },
-    last_30min: last30.length ? { high: r(Math.max(...last30.map((b) => b.h))), low: r(Math.min(...last30.map((b) => b.l))) } : null,
-    volume_nodes: nodes, pivots: pivots(bars5, price),
-    prior_day: yday ? { high: r(yday.h), low: r(yday.l), close: r(yday.c), volume: yday.v } : null,
-    five_day_high: prior.length ? r(Math.max(...prior.slice(-5).map((b) => b.h))) : null,
-    signals_on: sig ? Object.keys(sig.sig).filter((k) => sig.sig[k]) : [], vol_mult_last_bar: sig ? +sig.volMult.toFixed(1) : null,
-    recent_5min: bars5.slice(-12).map((b) => ({ t: `${String(Math.floor(etMinutes(b.t) / 60)).padStart(2, "0")}:${String(etMinutes(b.t) % 60).padStart(2, "0")}`, o: r(b.o), h: r(b.h), l: r(b.l), c: r(b.c), v: b.v })),
-    float_shares: extra.float || null, setup_grade: extra.grade || null, setup_score: extra.score || null, headline: extra.news ? String(extra.news).slice(0, 200) : null,
-  };
-}
-async function generatePlan(sym, pack) {
-  const body = {
-    model: PLAN_MODEL, max_tokens: 6000,
-    system: [{ type: "text", text: PLAN_SYSTEM, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: `Level pack for ${sym} as JSON:\n${JSON.stringify(pack)}` }],
-    output_config: { format: { type: "json_schema", schema: PLAN_SCHEMA } },
-  };
-  if (!/haiku/.test(PLAN_MODEL)) body.output_config.effort = PLAN_EFFORT;
-  const headers = { "content-type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" };
-  if (/^claude-(fable|mythos|opus-5)/.test(PLAN_MODEL)) { body.fallbacks = "default"; headers["anthropic-beta"] = "server-side-fallback-2026-07-01"; }
-  const ctl = new AbortController();
-  const tm = setTimeout(() => ctl.abort(), 150000);
-  let r, j;
-  try {
-    r = await fetch(ANTHROPIC_URL + "/v1/messages", { method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal });
-    j = await r.json().catch(() => ({}));
-  } finally { clearTimeout(tm); }
-  if (!r.ok) throw new Error(`AI ${r.status}: ${(j && j.error && j.error.message) || "request failed"}`);
-  if (j.stop_reason === "refusal") throw new Error("the model declined this request");
-  if (j.stop_reason === "max_tokens") throw new Error("the plan was cut off — try again");
-  const txt = (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
-  let raw;
-  try { raw = JSON.parse(txt); } catch (e) { throw new Error("the model returned malformed JSON"); }
-  const plan = sanitizePlan(raw, pack.price);
-  plan.model = j.model || PLAN_MODEL;
-  plan.usage = j.usage ? { in: j.usage.input_tokens, out: j.usage.output_tokens, cached: j.usage.cache_read_input_tokens || 0 } : null;
-  return plan;
-}
 
 /* ============================ settings persistence ============================ */
 const SETTINGS_FILE = "/tmp/scanner-settings.json";
@@ -879,7 +534,7 @@ const server = http.createServer(async (req, res) => {
 
   if (u === "/config" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ serverKeys: SERVER_KEYS, invite: !!INVITE_CODE, feed: SERVER_FEED, plans: !!ANTHROPIC_API_KEY, planModel: ANTHROPIC_API_KEY ? PLAN_MODEL : null }));
+    res.end(JSON.stringify({ serverKeys: SERVER_KEYS, invite: !!INVITE_CODE, feed: SERVER_FEED }));
     return;
   }
   if (u === "/auth/claim" && req.method === "POST") {
@@ -1022,50 +677,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (u === "/journal" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ stats: journalStats(20), recent: journal.slice(-30).reverse(), policy: { legacy: LEGACY_PUSH, hourlyCap: PUSH_HOURLY_CAP, symDailyCap: PUSH_SYM_DAILY_CAP, minPrice: MIN_PUSH_PRICE } }));
-    return;
-  }
-  if (u === "/plan" && req.method === "POST") {
-    if (!ANTHROPIC_API_KEY) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "AI plans are not configured on this server" }));
-      return;
-    }
-    if (SERVER_KEYS && INVITE_CODE && !deviceOk(req.headers["x-device"])) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "device not authorized — enter the access code" }));
-      return;
-    }
-    try {
-      const b = JSON.parse(await readBody(req) || "{}");
-      const sym = String(b.symbol || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 8);
-      if (!sym) throw new Error("symbol required");
-      const c = planCache[sym];
-      const age = c ? Date.now() - c.t : Infinity;
-      if (c && (age < (b.fresh ? 60000 : PLAN_TTL_MS))) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ plan: c.plan, t: c.t, cached: true }));
-        return;
-      }
-      const H = SERVER_KEYS
-        ? { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY }
-        : { "APCA-API-KEY-ID": req.headers["apca-api-key-id"] || "", "APCA-API-SECRET-KEY": req.headers["apca-api-secret-key"] || "" };
-      const feed = SERVER_KEYS ? SERVER_FEED : (b.feed === "sip" ? "sip" : "iex");
-      const pack = await buildLevelPack(sym, H, feed, { news: b.news, float: b.float, grade: b.grade, score: b.score });
-      const plan = await generatePlan(sym, pack);
-      planCache[sym] = { t: Date.now(), plan };
-      console.log("PLAN:", sym, plan.bias, plan.usage ? `${plan.usage.in}/${plan.usage.out} tok` : "");
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ plan, t: planCache[sym].t, cached: false }));
-    } catch (e) {
-      const msg = String(e && e.message || e);
-      res.writeHead(/^AI 4|symbol required|not enough tape/.test(msg) ? 400 : 502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: msg.slice(0, 200) }));
-    }
-    return;
-  }
   if (u.startsWith("/float/")) {
     const sym = u.slice(7).toUpperCase().replace(/[^A-Z.]/g, "");
     const v = await getFloat(sym);
@@ -1083,4 +694,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`\n  Momentum scanner running → http://localhost:${PORT}\n`));
 
-module.exports = { computeTriggers, encryptPayload, vapidJWT, setupSignals, tierOf, setupGate, sanitizePlan, journalStats, pivots };
+module.exports = { computeTriggers, encryptPayload, vapidJWT };
