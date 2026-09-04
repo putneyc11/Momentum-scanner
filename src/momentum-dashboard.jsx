@@ -103,12 +103,27 @@ function etMinutes(t) {
 
 /* ---------------- responsive ---------------- */
 function useWidth() {
-  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1024);
+  /* iPhone PWA can first-paint at ~980 (desktop Safari width) before the
+     visual viewport settles. Defaulting to 1024 made AdvancedChart pick the
+     desktop ROW layout; the only Time & Sales / Level 2 copy sat in a 210px
+     right rail behind overflow:hidden — gone from the screen, no scroll. */
+  const read = () => {
+    if (typeof window === "undefined") return 390;
+    const vv = window.visualViewport && window.visualViewport.width;
+    return (vv > 0 ? vv : window.innerWidth) || 390;
+  };
+  const [w, setW] = useState(read);
   useEffect(() => {
-    const f = () => setW(window.innerWidth);
+    const f = () => setW(read());
+    f();
     window.addEventListener("resize", f);
     window.addEventListener("orientationchange", f);
-    return () => { window.removeEventListener("resize", f); window.removeEventListener("orientationchange", f); };
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", f);
+    return () => {
+      window.removeEventListener("resize", f);
+      window.removeEventListener("orientationchange", f);
+      if (window.visualViewport) window.visualViewport.removeEventListener("resize", f);
+    };
   }, []);
   return w;
 }
@@ -1875,8 +1890,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
           </span>
         </div>
       )}
-      <div style={{ flex: 1, display: "flex", flexDirection: mobile ? "column" : "row", minHeight: 0, overflowY: mobile ? "auto" : "hidden" }}>
-        <div style={{ flex: mobile ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0, overflowY: mobile ? "visible" : "auto" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto" }}>
+        <div style={{ flex: "0 0 auto", minWidth: 0, display: "flex", flexDirection: "column" }}>
           <div className="chartbox" style={{ position: "relative", flex: mobile ? "0 0 auto" : "0 0 52%", height: mobile ? "34vh" : "auto", minHeight: mobile ? 220 : 300, touchAction: "none" }}>
             {chartHalt && (
               <div style={{ position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 5, background: "#2A0F14", border: `1px solid ${C.down}`, color: C.down, fontFamily: MONO, fontSize: 11, borderRadius: 6, padding: "5px 10px", whiteSpace: "nowrap" }}>
@@ -1902,15 +1917,13 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
               {mobile ? "hold & drag: inspect · swipe: pan · pinch: zoom" : "drag: pan · scroll: zoom · hover: inspect"}
             </div>
           </div>
-          {/* Phone: tape sits under the chart. The AI plan card + confluence
-              (4281224) and the tall Level 2 block (3a79f13) used to push
-              Time & Sales below the fold on a 390px iPhone, so the view
-              looked like a frozen daily candle with no last print. */}
-          {mobile && (
-            <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column" }}>
-              {sidebar}
-            </div>
-          )}
+          {/* Tape is ALWAYS under the chart. A `mobile &&` gate (or a right
+              rail that only mounts when width ≥ 720) is how T&S / Level 2
+              vanished on the iPhone recording: desktop row + overflow hidden
+              clipped the only copy, or the plan card buried it below confluence. */}
+          <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", flexShrink: 0 }}>
+            {sidebar}
+          </div>
           {/* today's numbers */}
           <div style={{ borderTop: `1px solid ${C.border}`, background: C.panel }}>
             <div style={{ padding: "10px 16px 0", fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Today's numbers</div>
@@ -2066,11 +2079,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
             )}
           </div>
         </div>
-        {!mobile && (
-          <div style={{ width: 210, borderLeft: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0, flexShrink: 0 }}>
-            {sidebar}
-          </div>
-        )}
+        {/* right rail removed — the tape mounts under the chart on every viewport */}
       </div>
       {toast && (
         <div role="status" style={{ position: "fixed", left: "50%", bottom: "calc(22px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 70, maxWidth: "calc(100% - 32px)", background: toast.ok ? "#0F2A1A" : "#2A0F14", border: `1px solid ${toast.ok ? C.up : C.down}`, color: toast.ok ? C.up : C.down, borderRadius: 10, padding: "10px 16px", fontFamily: MONO, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 10px 30px #000000AA", pointerEvents: "none" }}>

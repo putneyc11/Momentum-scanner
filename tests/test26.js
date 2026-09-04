@@ -95,12 +95,15 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
     const root = document.querySelector('#root').textContent;
     const cv = [...document.querySelectorAll('canvas')].find(c => c.clientHeight === 64 || c.clientHeight === 120);
     const ts = [...document.querySelectorAll('span')].find(s => s.textContent === 'Time & sales');
+    const l2h = [...document.querySelectorAll('span')].find(s => s.textContent === 'Level 2');
     const box = ts && ts.getBoundingClientRect();
+    const l2box = l2h && l2h.getBoundingClientRect();
     return {
       hdr: root.includes('Level 2') && root.includes('Best bid') && root.includes('Best ask'),
       bid: root.includes('$1.41'), ask: root.includes('$1.43'), ladder: root.includes('Row 1 = live NBBO'),
       chart: !!cv && cv.width > 0,
       tapeOnScreen: !!(box && box.top < window.innerHeight && box.bottom > 0),
+      l2OnScreen: !!(l2box && l2box.top < window.innerHeight && l2box.bottom > 0),
     };
   });
   console.log(l2.hdr && l2.bid && l2.ask && l2.ladder && l2.chart ? '✓ Level 2: best bid/ask block, depth chart, and Size·Bid·Ask·Size ladder from the NBBO' : '✗ Level 2 panel wrong: ' + JSON.stringify(l2));
@@ -109,7 +112,7 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
     return { last: root.includes('1.42'), waiting: /Waiting for trades/.test(root) };
   });
   console.log(tape.last && !tape.waiting ? '✓ Time & Sales shows the mocked last trade (1.42) instead of a frozen wait' : '✗ Advanced ticks missing: ' + JSON.stringify(tape));
-  console.log(l2.tapeOnScreen ? '✓ Time & Sales sits on the first Advanced screen (under the chart), not below the plan card' : '✗ Time & Sales off-screen: ' + JSON.stringify(l2));
+  console.log(l2.tapeOnScreen && l2.l2OnScreen ? '✓ Time & Sales and Level 2 sit on the first Advanced screen (under the chart)' : '✗ tape/L2 off-screen: ' + JSON.stringify(l2));
   const replayBtn = await page.evaluate(() => { const b = document.querySelector('button[aria-label="replay"]'); return b ? b.textContent.trim() : null; });
   console.log(replayBtn === '▶' ? '✓ icon-only replay control sits in the view-controls row' : '✗ replay control wrong: ' + JSON.stringify(replayBtn));
   // the four top bars must never spill past the phone's edge — and the price line is ONE line
