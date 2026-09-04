@@ -65,6 +65,8 @@ const fpct = (v) =>
   v == null || isNaN(v) ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
 const ftime = (d) =>
   new Date(d).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", timeZone: "America/New_York" });
+const ftimeSec = (d) =>
+  new Date(d).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/New_York" });
 const fdate = (d) =>
   new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" });
 
@@ -994,14 +996,15 @@ function tradedDepth(prints, quote) {
   asks.sort((a, b) => a.p - b.p);
   return { bids, asks, mid };
 }
-function Level2({ quote, prints }) {
+function Level2({ quote, prints, compact }) {
   const ref = useRef(null);
   const depth = useMemo(() => tradedDepth(prints, quote), [prints, quote]);
   const bs = quote ? (quote.bs || 0) * 100 : 0, as = quote ? (quote.as || 0) * 100 : 0;
   const spr = quote ? quote.ap - quote.bp : null;
   const sprPct = spr != null && depth.mid ? (spr / depth.mid) * 100 : null;
-  const bidRows = quote ? [{ p: quote.bp, s: bs, live: true }, ...depth.bids.slice(0, 4)] : [];
-  const askRows = quote ? [{ p: quote.ap, s: as, live: true }, ...depth.asks.slice(0, 4)] : [];
+  const extra = compact ? 2 : 4;
+  const bidRows = quote ? [{ p: quote.bp, s: bs, live: true }, ...depth.bids.slice(0, extra)] : [];
+  const askRows = quote ? [{ p: quote.ap, s: as, live: true }, ...depth.asks.slice(0, extra)] : [];
   useEffect(() => {
     const cv = ref.current;
     if (!cv || !quote) return;
@@ -1077,16 +1080,16 @@ function Level2({ quote, prints }) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "8px 12px 4px" }}>
             <div>
               <div style={{ fontSize: 10, color: C.dim }}>Best bid</div>
-              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.up, lineHeight: 1.1 }}>${fp(quote.bp)}</div>
+              <div style={{ fontFamily: MONO, fontSize: compact ? 16 : 22, fontWeight: 800, color: C.up, lineHeight: 1.1 }}>${fp(quote.bp)}</div>
               <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>× {fmtInt(bs)}</div>
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 10, color: C.dim }}>Best ask</div>
-              <div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 800, color: C.down, lineHeight: 1.1 }}>${fp(quote.ap)}</div>
+              <div style={{ fontFamily: MONO, fontSize: compact ? 16 : 22, fontWeight: 800, color: C.down, lineHeight: 1.1 }}>${fp(quote.ap)}</div>
               <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted }}>{fmtInt(as)} ×</div>
             </div>
           </div>
-          <canvas ref={ref} style={{ display: "block", width: "100%", height: 120 }} />
+          <canvas ref={ref} style={{ display: "block", width: "100%", height: compact ? 64 : 120 }} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", padding: "8px 12px 4px", fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderTop: `1px solid ${C.border}` }}>
             <span>Size</span><span style={{ textAlign: "right", paddingRight: 10 }}>Bid</span><span style={{ paddingLeft: 10 }}>Ask</span><span style={{ textAlign: "right" }}>Size</span>
           </div>
@@ -1141,6 +1144,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   const [bars, setBars] = useState([]);
   const [ticks, setTicks] = useState([]);
   const [live, setLive] = useState(false);
+  const [tapeErr, setTapeErr] = useState("");
+  const [tapeNote, setTapeNote] = useState("");
   const [show, setShow] = useState({ vwap: true, e8: true, e21: true, e50: true, pm: true });
   const [crossAbs, setCrossAbs] = useState(null);
   const [view, setView] = useState(null);
@@ -1151,6 +1156,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   const [flt, setFlt] = useState(null);
   const chartHaltRef = useRef(false);
   const lastTradeMsRef = useRef(0);
+  const lastPrintTRef = useRef(0);
   const tradesSeenRef = useRef(0);
   const tradeTimesRef = useRef([]);
   const canvasRef = useRef(null);
@@ -1248,11 +1254,19 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
     return () => { dead = true; };
   }, [symbol]);
 
-  /* live ticks + quotes, polling fallback, tape-stall halt */
+  /* live ticks + quotes. REST latest-trade is the reliability path —
+     the direct Alpaca websocket is an enhancement. Polling used to start
+     only on socket error/close, so a hang in CONNECTING (iOS PWA, silent
+     403 after auth, IEX with no prints) left Time & Sales on
+     "Waiting for trades…" forever. Both sockets and polls must surface
+     a failure; a silent freeze is the bug. */
   useEffect(() => {
-    let poll = null, dead = false;
-    tradesSeenRef.current = 0; lastTradeMsRef.current = 0; tradeTimesRef.current = [];
-    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]); printsRef.current = [];
+    let poll = null, dead = false, hangId = null;
+    const stream = feedMode(feed).stream;
+    const streamName = stream.toUpperCase();
+    tradesSeenRef.current = 0; lastTradeMsRef.current = 0; lastPrintTRef.current = 0; tradeTimesRef.current = [];
+    chartHaltRef.current = false; setChartHalt(false); setQuote(null); setBigTicks([]); setTicks([]); printsRef.current = [];
+    setLive(false); setTapeErr(""); setTapeNote("connecting to " + streamName);
     const haltId = setInterval(() => {
       const lastT = lastTradeMsRef.current;
       const preRate = tradeTimesRef.current.filter((t) => t >= lastT - 30000 && t <= lastT).length;
@@ -1262,6 +1276,9 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
       }
     }, 5000);
     const applyTrade = (p, s, t) => {
+      if (!(p > 0) || !isFinite(p) || !t || !isFinite(t)) return;
+      if (lastPrintTRef.current && t <= lastPrintTRef.current) return;
+      lastPrintTRef.current = t;
       lastTradeMsRef.current = Date.now();
       tradesSeenRef.current += 1;
       tradeTimesRef.current = [...tradeTimesRef.current.slice(-40), Date.now()];
@@ -1272,6 +1289,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
       setTicks((prev) => [{ p, s, t }, ...prev].slice(0, 40));
       printsRef.current = [{ p, s, t }, ...printsRef.current].slice(0, 800);
       if (s >= BIG_PRINT) setBigTicks((prev) => [{ p, s, t }, ...prev].slice(0, 80));
+      setTapeErr("");
+      setTapeNote("");
       if (feedMode(feed).delayMs) return;
       setBars((prev) => {
         if (prev.length === 0 || daily) return prev;
@@ -1285,42 +1304,82 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
         return [...prev, { t: bucket, o: p, h: p, l: p, c: p, v: s }];
       });
     };
-    const startPolling = () => {
-      poll = setInterval(async () => {
-        try {
-          const j = await alpaca(`/v2/stocks/${symbol}/trades/latest`, { feed: feedMode(feed).stream }, keys);
-          if (j.trade) applyTrade(j.trade.p, j.trade.s, new Date(j.trade.t).getTime());
-          const qj = await alpaca(`/v2/stocks/${symbol}/quotes/latest`, { feed: feedMode(feed).stream }, keys);
-          if (qj.quote) setQuote({ bp: qj.quote.bp, bs: qj.quote.bs, ap: qj.quote.ap, as: qj.quote.as, t: new Date(qj.quote.t).getTime() });
-        } catch (e) {}
-      }, 2000);
+    const pullLatest = async () => {
+      try {
+        const j = await alpaca(`/v2/stocks/${symbol}/trades/latest`, { feed: stream }, keys);
+        if (dead) return;
+        if (j && j.trade && j.trade.p > 0) {
+          const tt = new Date(j.trade.t).getTime();
+          applyTrade(j.trade.p, j.trade.s, tt);
+          if (!dead && isFinite(tt) && Date.now() - tt > 30000) {
+            setTapeNote("stale · last print " + ftimeSec(tt) + " ET");
+          }
+        } else if (!lastPrintTRef.current) {
+          setTapeNote("no last trade on " + streamName);
+        }
+      } catch (e) {
+        if (!dead) setTapeErr(String(e.message || e));
+      }
+      try {
+        const qj = await alpaca(`/v2/stocks/${symbol}/quotes/latest`, { feed: stream }, keys);
+        if (dead) return;
+        if (qj && qj.quote) setQuote({ bp: qj.quote.bp, bs: qj.quote.bs, ap: qj.quote.ap, as: qj.quote.as, t: new Date(qj.quote.t).getTime() });
+      } catch (e) {
+        /* a missing quote is not a missing last trade — leave tapeErr to the trade call */
+      }
     };
+    const startPolling = () => {
+      if (poll || dead) return;
+      poll = setInterval(pullLatest, 2000);
+    };
+    pullLatest();
+    startPolling();
+    hangId = setTimeout(() => {
+      if (dead) return;
+      if (!lastPrintTRef.current) setTapeNote(streamName + " stream silent — polling last trade");
+    }, 4000);
     try {
-      const ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${feedMode(feed).stream}`);
+      const ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${stream}`);
       wsRef.current = ws;
-      ws.onopen = () => ws.send(JSON.stringify({ action: "auth", key: keys.id.trim(), secret: keys.secret.trim() }));
+      ws.onopen = () => {
+        if (dead) { try { ws.close(); } catch {} return; }
+        ws.send(JSON.stringify({ action: "auth", key: keys.id.trim(), secret: keys.secret.trim() }));
+      };
       ws.onmessage = (ev) => {
-        let msgs; try { msgs = JSON.parse(ev.data); } catch { return; }
+        let raw; try { raw = JSON.parse(ev.data); } catch { return; }
+        const msgs = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? [raw] : []);
         for (const m of msgs) {
           if (m.T === "success" && m.msg === "authenticated") {
             ws.send(JSON.stringify({ action: "subscribe", trades: [symbol], quotes: [symbol] }));
             setLive(true);
+            setTapeNote("");
+            setTapeErr("");
           }
-          if (m.T === "error") { try { ws.close(); } catch {} }
+          if (m.T === "error") {
+            setLive(false);
+            const em = (m.msg || "stream error") + (m.code != null ? " (" + m.code + ")" : "");
+            if (!lastPrintTRef.current) setTapeErr(em);
+            else setTapeNote(streamName + " stream: " + em);
+            try { ws.close(); } catch {}
+          }
           if (m.T === "t" && m.S === symbol) applyTrade(m.p, m.s, new Date(m.t).getTime());
           if (m.T === "q" && m.S === symbol) setQuote({ bp: m.bp, bs: m.bs, ap: m.ap, as: m.as, t: new Date(m.t).getTime() });
         }
       };
-      ws.onerror = () => { setLive(false); if (!poll && !dead) startPolling(); };
-      ws.onclose = () => { setLive(false); if (!poll && !dead) startPolling(); };
-    } catch { startPolling(); }
+      ws.onerror = () => { setLive(false); if (!lastPrintTRef.current) setTapeNote(streamName + " socket error — polling last trade"); startPolling(); };
+      ws.onclose = () => { setLive(false); startPolling(); };
+    } catch (e) {
+      setTapeNote(streamName + " socket unavailable — polling last trade");
+      startPolling();
+    }
     return () => {
       dead = true;
       clearInterval(haltId);
+      if (hangId) clearTimeout(hangId);
       if (poll) clearInterval(poll);
       try { wsRef.current && wsRef.current.close(); } catch {}
     };
-  }, [symbol, feed, tf]);
+  }, [symbol, feed, tf, keys.id, keys.secret]);
 
   /* indicators + intraday stats */
   const calc = useMemo(() => {
@@ -1511,14 +1570,16 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   }, []);
 
   const last = bars[len - 1];
-  const price = last ? last.c : null;
+  const lastTick = ticks[0];
+  const price = lastTick ? lastTick.p : (last ? last.c : null);
   const inspBar = crossAbs != null && bars[crossAbs] ? bars[crossAbs] : null;
   const dispPrice = inspBar ? inspBar.c : price;
   const prevClose = g && g.pct != null && g.price ? g.price / (1 + g.pct / 100) : null;
+  const livePct = prevClose && price != null ? ((price - prevClose) / prevClose) * 100 : (g ? g.pct : null);
   const dispPct = inspBar
     ? (prevClose ? ((inspBar.c - prevClose) / prevClose) * 100
        : bars[0] ? ((inspBar.c - bars[0].o) / bars[0].o) * 100 : null)
-    : g ? g.pct : null;
+    : livePct;
   const following = view === null;
   const hasCustom = !!(prefs && ((prefs.off && prefs.off.length) || (prefs.lv && prefs.lv.length)));
   const spr = quote ? quote.ap - quote.bp : null;
@@ -1650,26 +1711,43 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
 
   const sidebar = (
     <>
-      <Level2 quote={quote} prints={printsRef.current} />
-      <div style={{ padding: "8px 12px", fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 8 }}>
+      <div style={{ padding: "8px 12px", fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "baseline" }}>
         <span>Time & sales</span>
         <span style={{ color: C.amber, textTransform: "none" }}>■ {fv(BIG_PRINT)}+ prints</span>
+        <span style={{ color: C.muted, textTransform: "none" }}>{feedMode(feed).short} · {feedMode(feed).stream.toUpperCase()}</span>
       </div>
+      {tapeErr && (
+        <div style={{ padding: "8px 12px", color: C.down, fontSize: 11, fontFamily: MONO, borderBottom: `1px solid ${C.border}` }}>
+          last trade unavailable · {tapeErr}
+        </div>
+      )}
+      {!tapeErr && tapeNote && ticks.length === 0 && (
+        <div style={{ padding: "8px 12px", color: C.amber, fontSize: 11, fontFamily: MONO, borderBottom: `1px solid ${C.border}` }}>
+          {tapeNote}
+        </div>
+      )}
+      {lastTick && Date.now() - lastTick.t > 30000 && (
+        <div style={{ padding: "6px 12px", color: C.amber, fontSize: 10, fontFamily: MONO, borderBottom: `1px solid ${C.border}` }}>
+          stale · last print {ftimeSec(lastTick.t)} ET
+        </div>
+      )}
       <div style={{ flex: mobile ? "0 0 auto" : 1, maxHeight: mobile ? 180 : undefined, overflowY: "auto", padding: "4px 0" }}>
-        {ticks.length === 0 && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>Waiting for trades…</div>}
+        {ticks.length === 0 && !tapeErr && !tapeNote && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>Waiting for trades on {feedMode(feed).stream.toUpperCase()}…</div>}
+        {ticks.length === 0 && tapeErr && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>No last print on this feed.</div>}
         {ticks.map((t, i) => {
           const prev = ticks[i + 1];
           const col = !prev || t.p === prev.p ? C.muted : t.p > prev.p ? C.up : C.down;
           const big = t.s >= BIG_PRINT;
           return (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 12px", fontFamily: MONO, fontSize: 11, background: big ? C.amber + "1A" : "transparent", borderLeft: big ? `2px solid ${C.amber}` : "2px solid transparent", fontWeight: big ? 700 : 400 }}>
-              <span style={{ color: big ? C.amber : C.dim }}>{ftime(t.t)}</span>
+              <span style={{ color: big ? C.amber : C.dim }}>{ftimeSec(t.t)}</span>
               <span style={{ color: col }}>{fp(t.p)}</span>
               <span style={{ color: big ? C.amber : C.dim }}>{fv(t.s)}</span>
             </div>
           );
         })}
       </div>
+      <Level2 quote={quote} prints={ticks.length ? printsRef.current : []} compact={mobile} />
       <div style={{ borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, padding: "7px 12px", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", display: "flex", gap: 8, alignItems: "baseline" }}>
         <span style={{ color: C.amber }}>■ Big prints</span>
         <span style={{ color: C.dim, textTransform: "none" }}>{fv(BIG_PRINT)}+ shares · {bigTicks.length} this session</span>
@@ -1809,7 +1887,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
               <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: C.dim }}>loading…</div>
             )}
             <span style={{ position: "absolute", top: 8, right: 8, zIndex: 4, fontFamily: MONO, fontSize: 9, letterSpacing: 0.5, color: live ? C.up : C.amber, pointerEvents: "none" }}>
-              {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
+              {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE")
+                : ticks.length ? "● 2s POLL · " + feedMode(feed).stream.toUpperCase()
+                : tapeErr ? "● FEED DOWN"
+                : "● CONNECTING · " + feedMode(feed).stream.toUpperCase()}
             </span>
             <canvas
               ref={canvasRef}
@@ -1821,6 +1902,15 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
               {mobile ? "hold & drag: inspect · swipe: pan · pinch: zoom" : "drag: pan · scroll: zoom · hover: inspect"}
             </div>
           </div>
+          {/* Phone: tape sits under the chart. The AI plan card + confluence
+              (4281224) and the tall Level 2 block (3a79f13) used to push
+              Time & Sales below the fold on a 390px iPhone, so the view
+              looked like a frozen daily candle with no last print. */}
+          {mobile && (
+            <div style={{ borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column" }}>
+              {sidebar}
+            </div>
+          )}
           {/* today's numbers */}
           <div style={{ borderTop: `1px solid ${C.border}`, background: C.panel }}>
             <div style={{ padding: "10px 16px 0", fontSize: 9, letterSpacing: 1.5, color: C.amber, textTransform: "uppercase", fontFamily: MONO }}>Today's numbers</div>
@@ -1976,9 +2066,11 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
             )}
           </div>
         </div>
-        <div style={{ width: mobile ? "100%" : 210, borderLeft: mobile ? "none" : `1px solid ${C.border}`, borderTop: mobile ? `1px solid ${C.border}` : "none", display: "flex", flexDirection: "column", minHeight: 0, flexShrink: 0 }}>
-          {sidebar}
-        </div>
+        {!mobile && (
+          <div style={{ width: 210, borderLeft: `1px solid ${C.border}`, display: "flex", flexDirection: "column", minHeight: 0, flexShrink: 0 }}>
+            {sidebar}
+          </div>
+        )}
       </div>
       {toast && (
         <div role="status" style={{ position: "fixed", left: "50%", bottom: "calc(22px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 70, maxWidth: "calc(100% - 32px)", background: toast.ok ? "#0F2A1A" : "#2A0F14", border: `1px solid ${toast.ok ? C.up : C.down}`, color: toast.ok ? C.up : C.down, borderRadius: 10, padding: "10px 16px", fontFamily: MONO, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 10px 30px #000000AA", pointerEvents: "none" }}>
