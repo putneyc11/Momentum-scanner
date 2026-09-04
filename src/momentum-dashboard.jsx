@@ -296,6 +296,29 @@ async function req(base, path, params, keys) {
   return r.json();
 }
 const alpaca = (path, params, keys) => req(DATA_URL, path, params, keys);
+/* A failed data call, explained. req() throws "<status>: <body>"; the body is
+   usually Alpaca's {"message": ...}. The hint names the recovery for the
+   failures this app has actually met. */
+function feedFailure(e) {
+  const raw = String((e && e.message) || e || "");
+  const m = raw.match(/^(\d{3}):\s*([\s\S]*)$/);
+  const code = m ? Number(m[1]) : 0;
+  let text = m ? m[2] : raw;
+  try { const j = JSON.parse(text); if (j && j.message) text = j.message; } catch {}
+  text = text.replace(/^\{"message":"|"\}$/g, "").slice(0, 160) || "request failed";
+  const hint = code === 403 || /subscription/i.test(text)
+    ? "Alpaca refused the request. Check the market-data subscription on the Alpaca dashboard, or switch the feed in Settings."
+    : code === 401
+    ? "This device is no longer authorized on the server. Reload the app to re-claim it."
+    : code === 429
+    ? "Rate limited by Alpaca. It clears on its own; leave the app open."
+    : code >= 500
+    ? "Alpaca or the push server is having trouble. Prices resume when it recovers."
+    : code === 0
+    ? "No response from the server. Check the connection, or the server may be asleep."
+    : "";
+  return { code, text, hint };
+}
 const alpacaT = (path, params, keys) => req(TRADING_URL, path, params, keys);
 const normBar = (b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v });
 
@@ -1141,6 +1164,13 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   const [bars, setBars] = useState([]);
   const [ticks, setTicks] = useState([]);
   const [live, setLive] = useState(false);
+  const [tapeErr, setTapeErr] = useState(null);   // {code,text,hint} while the tape poll fails
+  const tapeOkRef = useRef(0);                    // last print or quote that arrived (ms)
+  const [, setTapeClock] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTapeClock((c) => c + 1), 2000);
+    return () => clearInterval(id);
+  }, []);
   const [show, setShow] = useState({ vwap: true, e8: true, e21: true, e50: true, pm: true });
   const [crossAbs, setCrossAbs] = useState(null);
   const [view, setView] = useState(null);
@@ -1262,6 +1292,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
       }
     }, 5000);
     const applyTrade = (p, s, t) => {
+      tapeOkRef.current = Date.now();
       lastTradeMsRef.current = Date.now();
       tradesSeenRef.current += 1;
       tradeTimesRef.current = [...tradeTimesRef.current.slice(-40), Date.now()];
@@ -1292,7 +1323,9 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
           if (j.trade) applyTrade(j.trade.p, j.trade.s, new Date(j.trade.t).getTime());
           const qj = await alpaca(`/v2/stocks/${symbol}/quotes/latest`, { feed: feedMode(feed).stream }, keys);
           if (qj.quote) setQuote({ bp: qj.quote.bp, bs: qj.quote.bs, ap: qj.quote.ap, as: qj.quote.as, t: new Date(qj.quote.t).getTime() });
-        } catch (e) {}
+          tapeOkRef.current = Date.now();
+          setTapeErr(null);
+        } catch (e) { setTapeErr(feedFailure(e)); }
       }, 2000);
     };
     try {
@@ -1520,6 +1553,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
        : bars[0] ? ((inspBar.c - bars[0].o) / bars[0].o) * 100 : null)
     : g ? g.pct : null;
   const following = view === null;
+  const tapeDown = !!tapeErr || (!live && tapeOkRef.current > 0 && Date.now() - tapeOkRef.current > 30000);
   const hasCustom = !!(prefs && ((prefs.off && prefs.off.length) || (prefs.lv && prefs.lv.length)));
   const spr = quote ? quote.ap - quote.bp : null;
   const mid = quote ? (quote.ap + quote.bp) / 2 : null;
@@ -1656,7 +1690,13 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
         <span style={{ color: C.amber, textTransform: "none" }}>■ {fv(BIG_PRINT)}+ prints</span>
       </div>
       <div style={{ flex: mobile ? "0 0 auto" : 1, maxHeight: mobile ? 180 : undefined, overflowY: "auto", padding: "4px 0" }}>
-        {ticks.length === 0 && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>Waiting for trades…</div>}
+        {tapeDown && (
+          <div style={{ padding: "8px 12px", borderBottom: `1px solid ${C.border}`, fontFamily: MONO, fontSize: 11, color: C.down, lineHeight: 1.45 }}>
+            last trade unavailable · {tapeErr ? `${tapeErr.code ? tapeErr.code + " · " : ""}${tapeErr.text}` : "no prints or quotes in 30s+"}
+            {tapeErr && tapeErr.hint && <div style={{ color: C.muted, fontFamily: "system-ui, sans-serif", marginTop: 2 }}>{tapeErr.hint}</div>}
+          </div>
+        )}
+        {ticks.length === 0 && <div style={{ color: C.dim, fontSize: 11, padding: 12 }}>{tapeDown ? "No last print on this feed." : "Waiting for trades…"}</div>}
         {ticks.map((t, i) => {
           const prev = ticks[i + 1];
           const col = !prev || t.p === prev.p ? C.muted : t.p > prev.p ? C.up : C.down;
@@ -1808,8 +1848,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
             {visBars.length === 0 && !err && (
               <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: C.dim }}>loading…</div>
             )}
-            <span style={{ position: "absolute", top: 8, right: 8, zIndex: 4, fontFamily: MONO, fontSize: 9, letterSpacing: 0.5, color: live ? C.up : C.amber, pointerEvents: "none" }}>
-              {live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
+            <span style={{ position: "absolute", top: 8, left: 8, zIndex: 4, fontFamily: MONO, fontSize: 9, letterSpacing: 0.5, fontWeight: tapeDown ? 800 : 400, color: tapeDown ? C.down : live ? C.up : C.amber, pointerEvents: "none" }}>
+              {tapeDown ? "● FEED DOWN" : live ? (feedMode(feed).delayMs ? "● TICKS RT · 15m BARS" : "● LIVE") : "● 2s POLL"}
             </span>
             <canvas
               ref={canvasRef}
@@ -2089,6 +2129,16 @@ export default function App() {
   const [bannerX, setBannerX] = useState(0);
   const bannerTouchRef = useRef(null);
   const [pushWarn, setPushWarn] = useState(false);
+  /* feed health: the 3s tick is the only thing that moves prices, and it used
+     to fail in silence — a dead feed looked exactly like a quiet tape */
+  const [feedAt, setFeedAt] = useState(null);       // last successful tick (ms)
+  const [feedErr, setFeedErr] = useState(null);     // {code,text,hint,at} while ticks fail
+  const [, setClock] = useState(0);                 // 2s heartbeat so "Ns ago" stays honest
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setClock((c) => c + 1), 2000);
+    return () => clearInterval(id);
+  }, [running]);
   const [haltedSyms, setHaltedSyms] = useState([]);
   const [newsMap, setNewsMap] = useState({}); // sym -> {headline, at, dilution}
   const haltAtRef = useRef({});               // sym -> ms the halt flag was first raised
@@ -3004,7 +3054,11 @@ export default function App() {
         return { ...r, price: t.p, pct };
       }));
       setUpdated(new Date());
-    } catch (e) {}
+      setFeedAt(Date.now());
+      setFeedErr(null);
+    } catch (e) {
+      setFeedErr((prev) => ({ ...feedFailure(e), at: prev ? prev.at : Date.now() }));
+    }
   }, [keys, feed, checkLevels]);
   useEffect(() => {
     if (!running) return;
@@ -3040,6 +3094,13 @@ export default function App() {
   const selG = gainers.find((g) => g.symbol === selected);
   const sel = selected ? selG || { symbol: selected, pct: null } : null;
   const pmNow = inPremarket(); /* re-evaluated on every render (3s price ticks) */
+  /* FEED DOWN when ticks have failed for 8s straight (one blip never shows),
+     or when no tick has succeeded in 30s */
+  const feedDown = running && (
+    (feedErr && Date.now() - feedErr.at > 8000) ||
+    (feedAt != null && !feedErr && Date.now() - feedAt > 30000)
+  );
+  const feedAgeS = feedAt != null ? Math.round((Date.now() - feedAt) / 1000) : null;
   /* push follow-through headline: % of pushes green 15 minutes later. Below
      10 pushes the sample cannot support a verdict, so it renders neutral. */
   const jThin = !jStats || !jStats.n || jStats.n < 10;
@@ -3222,6 +3283,17 @@ export default function App() {
           </div>
           <div style={{ fontSize: 13, fontWeight: 700 }}>{alertLog[0].title}</div>
           <div style={{ fontSize: 11, color: C.muted }}>{alertLog[0].body}</div>
+        </div>
+      )}
+      {feedDown && (
+        <div role="alert" style={{ margin: "12px 14px 0", padding: "10px 12px", background: C.down + "15", border: `1px solid ${C.down}66`, borderRadius: 8, color: C.down, fontFamily: MONO, lineHeight: 1.45 }}>
+          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2 }}>● FEED DOWN · PRICES ARE NOT UPDATING</div>
+          <div style={{ fontSize: 12, color: C.text, marginTop: 3 }}>
+            {feedErr ? `${feedErr.code ? feedErr.code + " · " : ""}${feedErr.text}` : `no successful price update for ${feedAgeS}s`}
+          </div>
+          {feedErr && feedErr.hint && (
+            <div style={{ fontSize: 11, color: C.muted, marginTop: 4, fontFamily: "system-ui, sans-serif" }}>{feedErr.hint}</div>
+          )}
         </div>
       )}
       {pushWarn && (
