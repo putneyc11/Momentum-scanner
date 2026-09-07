@@ -67,3 +67,12 @@ ALL UI tests must pin the browser clock now — discovery is session-aware, so a
 unpinned test flips behavior depending on when it runs. See
 docs/PROJECT_HANDOFF.md §6 for the mock conventions and the timestamp/route-order
 gotchas before writing new tests.
+
+Helpers (not tests):
+- capture-current.js <outdir> — drives the live build through every screen
+                   (onboarding, plan, connect, home in each session, Advanced
+                   sections, alerts sheet, replay, feed down, alert center,
+                   settings, about) with mocked data and saves 390x790 @3x
+                   PNGs to <outdir>/cap. Useful for App Store screenshots.
+- render-ui.js <dir> — screenshots every .html in <dir> (the .device element)
+                   to <dir>/png at 3x.
