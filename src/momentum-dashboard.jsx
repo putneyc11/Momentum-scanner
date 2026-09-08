@@ -1634,24 +1634,40 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
     toastRef.current = setTimeout(() => setToast(null), 2600);
   };
   useEffect(() => () => { if (toastRef.current) clearTimeout(toastRef.current); }, []);
+  const [planWait, setPlanWait] = useState(0); // seconds the current analysis has been running
   const analyze = async (fresh) => {
     if (planBusy) return;
-    setPlanBusy(true); setPlanErr("");
+    setPlanBusy(true); setPlanErr(""); setPlanWait(0);
+    const t0 = Date.now();
+    const tick = setInterval(() => setPlanWait(Math.round((Date.now() - t0) / 1000)), 1000);
     try {
-      const r = await fetch("/plan", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "APCA-API-KEY-ID": (keys.id || "").trim(), "APCA-API-SECRET-KEY": (keys.secret || "").trim(),
-          ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}),
-        },
-        body: JSON.stringify({ symbol, feed: feedMode(feed).delayMs ? "iex" : feed, fresh: !!fresh, news: news ? news.headline : null, float: flt || null, grade: g && g.grade, score: g && g.score }),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.plan) throw new Error(j.error || `${r.status} ${r.statusText}`);
+      /* the server answers 202 while the model is still working (a thinking
+         model can outlast the hosting proxy's request limit) — keep polling
+         the same request until the plan or an error comes back */
+      let j = null;
+      for (let i = 0; ; i++) {
+        const r = await fetch("/plan", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "APCA-API-KEY-ID": (keys.id || "").trim(), "APCA-API-SECRET-KEY": (keys.secret || "").trim(),
+            ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}),
+          },
+          body: JSON.stringify({ symbol, feed: feedMode(feed).delayMs ? "iex" : feed, fresh: !!fresh && i === 0, news: news ? news.headline : null, float: flt || null, grade: g && g.grade, score: g && g.score }),
+        });
+        j = await r.json().catch(() => ({}));
+        if (r.status === 202 && j.pending) {
+          if (Date.now() - t0 > 240000) throw new Error("the model is taking too long — try again in a minute");
+          await new Promise((res) => setTimeout(res, 3000));
+          continue;
+        }
+        if (!r.ok || !j.plan) throw new Error(j.error || `${r.status} ${r.statusText || "request failed"}`);
+        break;
+      }
       setPlan(j.plan); setPlanT(j.t || Date.now()); setPlanPx(price);
       if (j.cached && fresh) say("Plan is under a minute old — showing it", true);
     } catch (e) { setPlanErr(String(e.message || e)); }
+    clearInterval(tick);
     setPlanBusy(false);
   };
   const planText = () => {
@@ -1935,7 +1951,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
                     Support and resistance from today's tape, plus three long-only ways to trade it. Nothing is sent until you tap Analyze.
                   </div>
                 )}
-                {planBusy && !plan && <div style={{ padding: "10px 12px", color: C.amber, fontSize: 11, fontFamily: MONO }}>Reading the tape — this takes a few seconds…</div>}
+                {planBusy && !plan && <div style={{ padding: "10px 12px", color: C.amber, fontSize: 11, fontFamily: MONO }}>{planWait < 15 ? "Reading the tape — this takes a few seconds…" : `Still working — the model is thinking through the levels (${planWait}s)`}</div>}
                 {planErr && <div style={{ padding: "8px 12px", color: C.down, fontSize: 11, fontFamily: MONO }}>✕ {planErr}</div>}
                 {plan && (
                   <>
