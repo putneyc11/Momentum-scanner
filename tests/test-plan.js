@@ -29,10 +29,14 @@ const stub = http.createServer((req, res) => {
   req.on("end", () => {
     if (req.url.startsWith("/v1/messages")) {
       aiCalls++; lastReq = { headers: req.headers, body: JSON.parse(body || "{}") };
+      const reply = () => {
       res.writeHead(200, { "Content-Type": "application/json" });
       if (mode === "refuse") return res.end(JSON.stringify({ stop_reason: "refusal", stop_details: { type: "refusal", category: null }, content: [] }));
       if (mode === "junk") return res.end(JSON.stringify({ stop_reason: "end_turn", content: [{ type: "text", text: "not json" }] }));
       return res.end(JSON.stringify({ model: "claude-opus-5", stop_reason: "end_turn", content: [{ type: "text", text: JSON.stringify(PLAN) }], usage: { input_tokens: 1800, output_tokens: 600, cache_read_input_tokens: 900 } }));
+      };
+      /* "slow": the model outlasts the server's hold window → 202 pending, then the plan */
+      return mode === "slow" ? setTimeout(reply, 1500) : reply();
     }
     const u = new URL(req.url, "http://x");
     const tf = u.searchParams.get("timeframe");
@@ -45,7 +49,7 @@ const stub = http.createServer((req, res) => {
 (async () => {
   await new Promise((r) => stub.listen(8798, r));
   const srvPath = path.join(__dirname, "server.js");
-  const env = { ...process.env, ALPACA_DATA_URL: "http://127.0.0.1:8798", ANTHROPIC_BASE_URL: "http://127.0.0.1:8798", ANTHROPIC_API_KEY: "sk-test", PLAN_MODEL: "claude-opus-5", PORT: "8797" };
+  const env = { ...process.env, ALPACA_DATA_URL: "http://127.0.0.1:8798", ANTHROPIC_BASE_URL: "http://127.0.0.1:8798", ANTHROPIC_API_KEY: "sk-test", PLAN_MODEL: "claude-opus-5", PORT: "8797", PLAN_WAIT_MS: "500" };
   const s1 = spawn("node", [srvPath], { env });
   await up(8797);
   const B = "http://127.0.0.1:8797";
@@ -60,6 +64,7 @@ const stub = http.createServer((req, res) => {
   ok(aiCalls === 1 && lastReq.headers["x-api-key"] === "sk-test" && lastReq.body.model === "claude-opus-5", "one model call, with the server's key and the configured model");
   ok(lastReq.body.output_config && lastReq.body.output_config.format && lastReq.body.output_config.format.type === "json_schema" && lastReq.body.output_config.effort, "request uses a JSON-schema structured output plus an effort setting");
   ok(lastReq.body.fallbacks === "default" && lastReq.headers["anthropic-beta"] === "server-side-fallback-2026-07-01", "refusal fallbacks are on for the Opus 5 tier");
+  ok(lastReq.body.max_tokens >= 16000, "max_tokens leaves room for thinking on top of the JSON (was cut off at 6000)");
   ok(Array.isArray(lastReq.body.system) && lastReq.body.system[0].cache_control && lastReq.body.system[0].cache_control.type === "ephemeral", "the stable system prompt is marked for prompt caching");
   const pack = JSON.parse(lastReq.body.messages[0].content.split("\n").slice(1).join("\n"));
   ok(pack.symbol === "GOODA" && pack.bars_today === 60 && pack.vwap > 1 && pack.ema8 > pack.ema21 && pack.prev_close === 0.82 && pack.headline && pack.setup_grade === "B", "level pack carries tape-derived numbers (VWAP, EMAs, prior close) plus the client's headline and grade");
@@ -79,6 +84,15 @@ const stub = http.createServer((req, res) => {
   mode = "junk";
   r = await post({ symbol: "JUNK" }); j = await r.json();
   ok(r.status === 502 && /malformed/.test(j.error), "malformed model output is surfaced as an error");
+  mode = "slow";
+  const c0 = aiCalls;
+  r = await post({ symbol: "SLOWA", feed: "iex" }); j = await r.json();
+  ok(r.status === 202 && j.pending === true && typeof j.since === "number", "a model call that outlasts the hold window answers 202 pending instead of tying up the request");
+  r = await post({ symbol: "SLOWA", feed: "iex" }); j = await r.json();
+  ok(r.status === 202 && j.pending === true && aiCalls === c0 + 1, "a poll while the job runs joins it — no second model call");
+  await wait(1200);
+  r = await post({ symbol: "SLOWA", feed: "iex" }); j = await r.json();
+  ok(r.status === 200 && j.plan && j.plan.scenarios.length === 3 && aiCalls === c0 + 1, "the next poll returns the finished plan from the same single model call");
   mode = "ok";
   r = await post({ symbol: "NOPE" }); j = await r.json();
   ok(r.status === 400 && /not enough tape/.test(j.error), "a symbol with no bars today is rejected before any model call");

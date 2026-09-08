@@ -35,6 +35,10 @@ const ANTHROPIC_URL = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.
 const PLAN_MODEL = process.env.PLAN_MODEL || "claude-opus-5";
 const PLAN_EFFORT = process.env.PLAN_EFFORT || "medium";
 const PLAN_TTL_MS = 5 * 60000;
+/* how long POST /plan holds the request open before answering "still working":
+   the hosting proxy kills idle requests around 100s, and a thinking model can
+   take longer than that, so the client polls instead of waiting on one call */
+const PLAN_WAIT_MS = Number(process.env.PLAN_WAIT_MS) || 20000;
 const SUBS_FILE = "/tmp/scanner-subs.json";
 const DEVICES_FILE = "/tmp/scanner-devices.json";
 
@@ -696,7 +700,8 @@ function sessionStartISO(daysBack) {
    it returns is then range-checked against the live price. Cached per
    symbol for 5 minutes. Raw Messages API over fetch — this server ships
    with no npm install step. */
-const planCache = {}; // sym -> { t, plan }
+const planCache = {};
+const planJobs = {}; // sym -> { t, p, done, err } — generation in flight // sym -> { t, plan }
 const PLAN_SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["bias", "summary", "levels", "scenarios", "must_hold", "must_fail", "risk_notes"],
@@ -838,7 +843,9 @@ async function buildLevelPack(sym, H, feed, extra) {
 }
 async function generatePlan(sym, pack) {
   const body = {
-    model: PLAN_MODEL, max_tokens: 6000,
+    /* thinking is on by default on this tier and counts against max_tokens —
+       6000 was getting cut off before the JSON finished */
+    model: PLAN_MODEL, max_tokens: 16000,
     system: [{ type: "text", text: PLAN_SYSTEM, cache_control: { type: "ephemeral" } }],
     messages: [{ role: "user", content: `Level pack for ${sym} as JSON:\n${JSON.stringify(pack)}` }],
     output_config: { format: { type: "json_schema", schema: PLAN_SCHEMA } },
@@ -1214,16 +1221,37 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ plan: c.plan, t: c.t, cached: true }));
         return;
       }
-      const H = SERVER_KEYS
-        ? { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY }
-        : { "APCA-API-KEY-ID": req.headers["apca-api-key-id"] || "", "APCA-API-SECRET-KEY": req.headers["apca-api-secret-key"] || "" };
-      const feed = SERVER_KEYS ? SERVER_FEED : (b.feed === "sip" ? "sip" : "iex");
-      const pack = await buildLevelPack(sym, H, feed, { news: b.news, float: b.float, grade: b.grade, score: b.score });
-      const plan = await generatePlan(sym, pack);
-      planCache[sym] = { t: Date.now(), plan };
-      console.log("PLAN:", sym, plan.bias, plan.usage ? `${plan.usage.in}/${plan.usage.out} tok` : "");
+      /* one generation per symbol at a time; a poll (or a second device) joins it */
+      let job = planJobs[sym];
+      if (!job) {
+        const H = SERVER_KEYS
+          ? { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY }
+          : { "APCA-API-KEY-ID": req.headers["apca-api-key-id"] || "", "APCA-API-SECRET-KEY": req.headers["apca-api-secret-key"] || "" };
+        const feed = SERVER_KEYS ? SERVER_FEED : (b.feed === "sip" ? "sip" : "iex");
+        job = { t: Date.now(), done: false, err: null };
+        job.p = (async () => {
+          const pack = await buildLevelPack(sym, H, feed, { news: b.news, float: b.float, grade: b.grade, score: b.score });
+          const plan = await generatePlan(sym, pack);
+          planCache[sym] = { t: Date.now(), plan };
+          console.log("PLAN:", sym, plan.bias, plan.usage ? `${plan.usage.in}/${plan.usage.out} tok` : "");
+          return plan;
+        })();
+        job.p.then(() => { job.done = true; }, (e) => { job.done = true; job.err = e; console.log("PLAN failed:", sym, String(e && e.message || e)); })
+          .then(() => { if (planJobs[sym] === job) setTimeout(() => { if (planJobs[sym] === job) delete planJobs[sym]; }, 60000); });
+        planJobs[sym] = job;
+      }
+      let timer;
+      const waited = await Promise.race([job.p.then(() => true, () => true), new Promise((r) => { timer = setTimeout(() => r(false), PLAN_WAIT_MS); })]);
+      clearTimeout(timer);
+      if (!waited) {
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ pending: true, since: job.t }));
+        return;
+      }
+      if (job.err) { delete planJobs[sym]; throw job.err; }
+      delete planJobs[sym];
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ plan, t: planCache[sym].t, cached: false }));
+      res.end(JSON.stringify({ plan: planCache[sym].plan, t: planCache[sym].t, cached: false }));
     } catch (e) {
       const msg = String(e && e.message || e);
       res.writeHead(/^AI 4|symbol required|not enough tape/.test(msg) ? 400 : 502, { "Content-Type": "application/json" });

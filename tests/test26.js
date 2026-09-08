@@ -39,9 +39,11 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   await page.route('**/push/**', (r) => r.fulfill({ json: { ok: true, key: 'x' } }));
   await page.route('**/settings', (r) => r.fulfill({ json: {} }));
   await page.route('**/config', (r) => r.fulfill({ json: { serverKeys: false, invite: false, feed: 'sip', plans: true, planModel: 'claude-opus-5' } }));
-  let planReq = null;
+  let planReq = null, planCalls = 0;
   await page.route('**/plan', (r) => {
     planReq = JSON.parse(r.request().postData() || '{}');
+    /* first answer is the server's "still working" 202 — the client must poll, not fail */
+    if (++planCalls === 1) return r.fulfill({ status: 202, json: { pending: true, since: Date.now() } });
     r.fulfill({ json: { cached: false, t: Date.now(), plan: {
       bias: 'bullish', summary: 'Holding VWAP with a rising tape; the dip to 1.24 is the trade.',
       levels: [{ price: 1.15, kind: 'support', label: 'VWAP', strength: 2 }, { price: 1.24, kind: 'support', label: 'EMA 8', strength: 3 }, { price: 1.50, kind: 'resistance', label: 'PMH', strength: 2 }],
@@ -164,6 +166,10 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   console.log(bP.includes('AI trade plan') && bP.includes('Nothing is sent until you tap Analyze') ? '✓ AI plan card is idle until asked (nothing sent on open)' : '✗ plan card missing or eager');
   await page.click('button[aria-label="analyze"]');
   await page.waitForTimeout(600);
+  const busy = await page.textContent('#root');
+  console.log(busy.includes('Analyzing') && !busy.includes('✕') ? '✓ a 202 "still working" answer keeps the card in its busy state instead of erroring' : '✗ 202 handled as an error: ' + busy.slice(busy.indexOf('AI TRADE'), busy.indexOf('AI TRADE') + 200));
+  await page.waitForSelector('text=Long continuation', { timeout: 10000 });
+  console.log(planCalls === 2 ? '✓ the client polled once and picked up the finished plan' : '✗ poll count wrong: ' + planCalls);
   const bQ = await page.textContent('#root');
   console.log(planReq && planReq.symbol === 'GOODA' && planReq.fresh === false ? '✓ Analyze posts the symbol to /plan' : '✗ plan request wrong: ' + JSON.stringify(planReq));
   console.log(bQ.includes('Long continuation') && bQ.includes('Dip buy') && bQ.includes('Stand aside') && bQ.includes('MUST HOLD') && bQ.includes('$1.19') ? '✓ plan renders three scenarios with must-hold / must-fail' : '✗ plan scenarios missing');

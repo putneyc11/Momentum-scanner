@@ -110,6 +110,7 @@ PR bodies, or code comments.
 | `ANTHROPIC_API_KEY` | for AI plans | Enables `POST /plan`. Without it `/config` reports `plans:false` and the UI hides the card. |
 | `PLAN_MODEL` | no | Defaults to `claude-opus-5`. |
 | `PLAN_EFFORT` | no | Defaults to `medium`. Ignored for Haiku models. |
+| `PLAN_WAIT_MS` | no | How long `POST /plan` holds a request before answering `202 {pending:true}` (default 20000). The client polls every 3 s until the plan lands; the hosting proxy kills requests around 100 s, so never raise this near that. |
 | `APNS_KEY_P8` / `APNS_KEY_ID` / `APNS_TEAM_ID` | for the iOS app | Turns on APNs delivery for the native shell. `APNS_BUNDLE_ID` (default `com.momentumscanner.app`), `APNS_SANDBOX=1` for Xcode-debug tokens, `APNS_HOST` for tests. `/config` reports `apns`. |
 | `SUPPORT_EMAIL` | no | Address printed on `/privacy`, `/terms`, `/support`. |
 | `SERVER_FEED` | no | `sip` (default) or `iex`. Sets the feed clients get in server-keys mode. |
@@ -191,7 +192,7 @@ Then, with `PW_EXECUTABLE` pointing at the sandbox Chromium:
 
 | Suite | Clock pinned to | Expect |
 |---|---|---|
-| `tests/test26.js` | 13:00 ET | 35 checks, Advanced view |
+| `tests/test26.js` | 13:00 ET | 37 checks, Advanced view |
 | `tests/test28.js` | 17:30 ET | 19 checks, alerts + After Hours |
 | `tests/test-native.js` | 13:00 ET | 18 checks, App Store (Capacitor) mode with a fake bridge |
 | `tests/test-pm.js` | 07:30 ET | 8 checks, premarket discovery |

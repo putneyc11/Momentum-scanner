@@ -8,7 +8,8 @@
 - test-plan.js   — server unit: POST /plan against a stub Alpaca AND a stub
                    Anthropic endpoint (level pack contents, JSON-schema
                    structured output, fallbacks header, prompt caching,
-                   range-checked levels, 5-min cache + refresh rate limit,
+                   range-checked levels, 5-min cache + refresh rate limit, the
+                   202-pending / poll path for slow model calls,
                    refusal / malformed / no-tape errors, /journal, and the
                    no-key 503). Run from tests/: `cp ../deploy/server.js . && node test-plan.js`
 - test-serverkeys.js — server unit: SERVER-KEYS mode (env-held credentials,
