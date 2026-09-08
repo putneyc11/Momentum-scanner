@@ -290,20 +290,199 @@ const DEVICE = { id: "" };
 const NATIVE = () => { try { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); } catch (e) { return false; } };
 const capPlugin = (name) => { try { return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]) || null; } catch (e) { return null; } };
 /* ask iOS for notification permission and an APNs token; null when refused */
-async function nativePushToken() {
+async function nativePushToken(requestPermission = true) {
   const PN = capPlugin("PushNotifications");
   if (!PN) return null;
   let perm = await PN.checkPermissions();
-  if (perm.receive === "prompt" || perm.receive === "prompt-with-rationale") perm = await PN.requestPermissions();
+  if (requestPermission && (perm.receive === "prompt" || perm.receive === "prompt-with-rationale")) perm = await PN.requestPermissions();
   if (perm.receive !== "granted") return null;
   return new Promise((resolve) => {
-    let done = false;
-    const fin = (v) => { if (!done) { done = true; resolve(v); } };
-    PN.addListener("registration", (t) => fin(t && t.value ? String(t.value) : null));
-    PN.addListener("registrationError", () => fin(null));
-    setTimeout(() => fin(null), 10000);
-    PN.register().catch(() => fin(null));
+    let done = false, timer;
+    const handles = [];
+    const fin = (v) => {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      handles.forEach((h) => { try { h.remove(); } catch (e) {} });
+      resolve(v);
+    };
+    const listen = async (event, fn) => {
+      const h = await PN.addListener(event, fn);
+      if (done) { try { h.remove(); } catch (e) {} } else handles.push(h);
+    };
+    timer = setTimeout(() => fin(null), 10000);
+    Promise.all([
+      listen("registration", (t) => fin(t && t.value ? String(t.value) : null)),
+      listen("registrationError", () => fin(null)),
+    ]).then(() => { if (!done) return PN.register(); }).catch(() => fin(null));
   });
+}
+
+/* Push recovery is serialized with bell-off: a slow registration must finish
+   before it is removed, and cannot re-arm a device after the user disables it.
+   A browser subscription alone says nothing about the server's current store. */
+async function pushJSON(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: controller.signal,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || (body !== undefined && j.ok !== true))
+      throw new Error(j.error || `${path}: HTTP ${r.status}`);
+    return j;
+  } finally { clearTimeout(timer); }
+}
+function pushKeyBytes(key) {
+  const raw = atob(String(key || "").replace(/-/g, "+").replace(/_/g, "/"));
+  if (raw.length !== 65 || raw.charCodeAt(0) !== 4) throw new Error("Invalid server push key");
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+function pushKeyMatches(sub, expected) {
+  const key = sub && sub.options && sub.options.applicationServerKey;
+  if (!key) return false;
+  const actual = ArrayBuffer.isView(key) ? new Uint8Array(key.buffer, key.byteOffset, key.byteLength) : new Uint8Array(key);
+  return actual.length === expected.length && actual.every((x, i) => x === expected[i]);
+}
+function createPushRecovery({ getContext, onState }) {
+  let enabled = false, epoch = 0, armed = false, tail = Promise.resolve();
+  let pending = null, pendingWatch = null, watchRevision = 0, armedConnection = null;
+  const sameConnection = (a, b) => !!a && !!b && a.device === b.device && a.feed === b.feed &&
+    a.keys.id === b.keys.id && a.keys.secret === b.keys.secret && (a.keys.code || "") === (b.keys.code || "");
+  const enqueue = (fn) => { const p = tail.then(fn, fn); tail = p.catch(() => {}); return p; };
+  const state = (value, error = "") => { armed = value; onState({ armed: value, error }); };
+  const current = (version) => enabled && epoch === version;
+  const check = (version) => { if (!current(version)) throw new Error("Push recovery cancelled"); };
+  const watch = async (version) => {
+    let sentRevision;
+    do {
+      check(version);
+      const ctx = getContext();
+      if (!ctx.watchReady) throw new Error("Waiting for scanner watchlist");
+      sentRevision = watchRevision;
+      await pushJSON("/push/watchlist", ctx.watchlist);
+      check(version);
+    } while (sentRevision !== watchRevision); /* drain edits made during the POST */
+  };
+  const reconcile = ({ requestPermission = false } = {}) => {
+    if (!enabled) return Promise.resolve(false);
+    if (armed && !sameConnection(armedConnection, getContext())) state(false);
+    if (pending && pending.epoch === epoch) return pending.promise;
+    const version = epoch;
+    /* Safari needs this call in the bell's user gesture, before network I/O. */
+    let permission;
+    try {
+      if (requestPermission && !NATIVE() && "Notification" in window)
+        permission = Promise.resolve(Notification.permission === "default" ? Notification.requestPermission() : Notification.permission);
+    } catch (e) { permission = Promise.reject(e); }
+    if (permission) permission.catch(() => {});
+    const promise = enqueue(async () => {
+      while (current(version)) {
+        const context = getContext();
+        const ctx = { ...context, keys: { ...context.keys } };
+        try {
+          check(version);
+          if (!ctx.device || !ctx.keys.id || !ctx.keys.secret) throw new Error("Waiting for scanner connection");
+          if (ctx.keys.id === "server") {
+            await pushJSON("/auth/claim", { device: ctx.device, code: ctx.keys.code || "" });
+            check(version);
+          }
+          let registration;
+          if (NATIVE() && capPlugin("PushNotifications")) {
+            const token = await nativePushToken(requestPermission);
+            check(version);
+            if (!token) throw new Error("Allow notifications for Momentum Scanner in iOS Settings to get lock-screen push.");
+            registration = { apns: token };
+          } else {
+            if (!("serviceWorker" in navigator && "PushManager" in window && "Notification" in window))
+              throw new Error("Add to Home Screen (iOS) or use desktop/Android for lock-screen push.");
+            const perm = permission ? await permission : Notification.permission;
+            check(version);
+            if (perm !== "granted") throw new Error("Notification permission is needed for lock-screen push. Use the bell to enable it.");
+            const pk = await pushJSON("/push/pubkey");
+            check(version);
+            const key = pushKeyBytes(pk.key);
+            let reg = await navigator.serviceWorker.register("/sw.js");
+            if (!reg.active && navigator.serviceWorker.ready) {
+              let timer;
+              try {
+                reg = await Promise.race([
+                  navigator.serviceWorker.ready,
+                  new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Push service worker is not ready yet")), 15000); }),
+                ]);
+              } finally { clearTimeout(timer); }
+            }
+            check(version);
+            let sub = await reg.pushManager.getSubscription();
+            check(version);
+            if (sub && !pushKeyMatches(sub, key)) {
+              if (!await sub.unsubscribe()) throw new Error("Could not replace the old push subscription");
+              check(version);
+              sub = null;
+            }
+            if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+            check(version);
+            registration = { subscription: sub };
+          }
+          await pushJSON("/push/register", { ...registration, keys: ctx.keys, feed: ctx.feed, device: ctx.device });
+          check(version);
+          if (!sameConnection(ctx, getContext())) continue;
+          await watch(version);
+          if (!sameConnection(ctx, getContext())) continue;
+          armedConnection = ctx;
+          state(true);
+          return true;
+        } catch (e) {
+          if (current(version) && !sameConnection(ctx, getContext())) continue;
+          if (current(version)) state(false, String(e.message || e));
+          return false;
+        }
+      }
+      return false;
+    });
+    pending = { epoch: version, promise };
+    promise.finally(() => { if (pending && pending.promise === promise) pending = null; });
+    return promise;
+  };
+  return {
+    enable() { if (!enabled) { enabled = true; epoch++; state(false); } },
+    reconcile,
+    syncWatch() {
+      if (!enabled) return Promise.resolve(false);
+      watchRevision++;
+      if (!armed || !sameConnection(armedConnection, getContext())) return reconcile();
+      if (pendingWatch && pendingWatch.epoch === epoch) return pendingWatch.promise;
+      const version = epoch;
+      const promise = enqueue(async () => {
+        try { await watch(version); return true; }
+        catch (e) { if (current(version)) state(false, String(e.message || e)); return false; }
+      });
+      pendingWatch = { epoch: version, promise };
+      promise.finally(() => { if (pendingWatch && pendingWatch.promise === promise) pendingWatch = null; });
+      return promise;
+    },
+    disable() {
+      enabled = false; epoch++; state(false);
+      return enqueue(async () => {
+        let endpoint = null, localError = null;
+        try {
+          if ("serviceWorker" in navigator) {
+            const reg = await navigator.serviceWorker.getRegistration();
+            const sub = reg && await reg.pushManager.getSubscription();
+            if (sub) {
+              endpoint = sub.endpoint;
+              if (!await sub.unsubscribe()) throw new Error("Could not remove the browser push subscription");
+            }
+          }
+        } catch (e) { localError = e; }
+        await pushJSON("/push/unregister", { endpoint, device: getContext().device || undefined });
+        if (localError) throw localError;
+      });
+    },
+  };
 }
 async function req(base, path, params, keys) {
   const qs = new URLSearchParams(params).toString();
@@ -2257,6 +2436,7 @@ export default function App() {
   const [maxPrice, setMaxPrice] = useState(100);
   const [minDayVol, setMinDayVol] = useState(2000000);
   const [running, setRunning] = useState(false);
+  const [pushConnection, setPushConnection] = useState(null); /* last connected setup, independent of Settings drafts */
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [gainers, setGainers] = useState([]);
@@ -2267,6 +2447,9 @@ export default function App() {
   const [found, setFound] = useState(0);
   const [alertsOn, setAlertsOn] = useState(false);
   const [pushArmed, setPushArmed] = useState(false);
+  const [pushSyncError, setPushSyncError] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [deviceReady, setDeviceReady] = useState(false);
   const [alertLog, setAlertLog] = useState([]);
   const [alertCenter, setAlertCenter] = useState(false);
   const [jStats, setJStats] = useState(null); // push follow-through from the server journal
@@ -2319,6 +2502,9 @@ export default function App() {
      watchlist + push registration, and the local sign-in. */
   const deleteAccount = useCallback(async () => {
     if (!window.confirm("Delete your account? Your plan, synced watchlist and alert rules are removed from our server. This cannot be undone.")) return;
+    alertsOnRef.current = false;
+    setAlertsOn(false);
+    await pushRecoveryRef.current.disable().catch(() => {});
     try {
       await fetch("/auth/forget", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: DEVICE.id }) });
     } catch (e) {}
@@ -2350,6 +2536,7 @@ export default function App() {
         try { window.storage.set("device-id", id); } catch (e) {}
       }
       DEVICE.id = id;
+      setDeviceReady(true);
     })();
   }, []);
 
@@ -2366,31 +2553,21 @@ export default function App() {
       const sv = { id: "server", secret: "server", code: invite.trim(), feed: (srvCfg && srvCfg.feed) || "sip", maxPrice, minDayVol, ver: 4 };
       setKeys({ id: "server", secret: "server", code: sv.code });
       setFeed(sv.feed);
+      setPushConnection({ keys: { id: "server", secret: "server", code: sv.code }, feed: sv.feed });
       try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}
       setRunning(true);
     } catch (e) { setErr(String(e.message || e)); }
   }, [invite, srvCfg, maxPrice, minDayVol, account]);
 
-  /* the server's device store is ephemeral across deploys — re-claim
-     silently on boot so a running device never gets locked out */
+  /* Restore proxy access even when alerts are disabled. Push recovery owns
+     the claim + registration sequence while alerts are enabled. */
   useEffect(() => {
-    if (!srvCfg || !srvCfg.serverKeys || !running || keys.id !== "server") return;
-    const t = setTimeout(() => {
-      try {
-        fetch("/auth/claim", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: keys.code || "", device: DEVICE.id }),
-        }).then(async () => {
-          /* native shell: the APNs token must follow the re-claim, or the
-             device is known but unreachable until the bell is toggled */
-          if (!NATIVE() || !alertsOnRef.current || !capPlugin("PushNotifications")) return;
-          const tok = await nativePushToken();
-          if (tok) { await fetch("/push/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apns: tok, device: DEVICE.id }) }); setPushArmed(true); }
-        }).catch(() => {});
-      } catch (e) {}
-    }, 1200);
-    return () => clearTimeout(t);
-  }, [srvCfg, running, keys]);
+    if (!deviceReady || !running || !pushConnection || pushConnection.keys.id !== "server" || alertsOn) return;
+    let active = true;
+    pushJSON("/auth/claim", { code: pushConnection.keys.code || "", device: DEVICE.id })
+      .catch((e) => { if (active) setErr(String(e.message || e)); });
+    return () => { active = false; };
+  }, [deviceReady, running, pushConnection, alertsOn]);
 
   /* first-run walkthrough: only on a device with no stored keys yet */
   useEffect(() => {
@@ -2454,6 +2631,7 @@ export default function App() {
   const candRef = useRef({});
   const hotRef = useRef([]);
   const sweepBusy = useRef(false);
+  const sweepReadyRef = useRef(false); /* only a complete, successful sweep establishes an empty market */
   const busy = useRef(false);
   const alertsOnRef = useRef(false);
   const audioRef = useRef(null);
@@ -2472,6 +2650,7 @@ export default function App() {
   const dayRef = useRef(null); /* ET day of the last sweep — rollover wipes the slate for the 4 AM open */
   const mutedRef = useRef(new Set()); /* per-symbol alert mutes (see toggleMute) */
   const watchPoolRef = useRef([]); /* latest computed monitor pool, pre-mute-filter */
+  const watchReadyRef = useRef(false); /* startup [] is not a discovered empty market */
 
   /* ---- per-symbol alert mutes: the small bell on every watchlist row.
      A muted symbol is skipped by the in-app trigger scan AND filtered out of
@@ -2489,14 +2668,23 @@ export default function App() {
   };
   const [alertMode, setAlertModeState] = useState("rec");
   const alertModeRef = useRef("rec");
-  const syncWatch = useCallback(() => {
-    try {
-      fetch("/push/watchlist", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined, prefs: alertPrefsRef.current, mode: alertModeRef.current }),
-      }).catch(() => {});
-    } catch (e) {}
-  }, []);
+  const pushArmedRef = useRef(false);
+  const alertToggleAttemptRef = useRef(0);
+  const pushContextRef = useRef(null);
+  pushContextRef.current = pushConnection || { keys: { id: "", secret: "" }, feed: "sip" };
+  const pushRecoveryRef = useRef(null);
+  if (!pushRecoveryRef.current) pushRecoveryRef.current = createPushRecovery({
+    getContext: () => ({
+      ...pushContextRef.current, device: DEVICE.id, watchReady: watchReadyRef.current,
+      watchlist: { symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined, prefs: alertPrefsRef.current, mode: alertModeRef.current },
+    }),
+    onState: ({ armed, error }) => {
+      pushArmedRef.current = armed;
+      setPushArmed(armed);
+      setPushSyncError(error);
+    },
+  });
+  const syncWatch = useCallback(() => pushRecoveryRef.current.syncWatch(), []);
   const setAlertMode = useCallback((m) => {
     alertModeRef.current = m === "all" ? "all" : "rec";
     setAlertModeState(alertModeRef.current);
@@ -2532,14 +2720,17 @@ export default function App() {
         } catch {}
       }
       if (v) {
-        setKeys({ id: v.id || "", secret: v.secret || "" });
+        setKeys({ id: v.id || "", secret: v.secret || "", ...(v.code ? { code: v.code } : {}) });
         if (v.maxPrice) setMaxPrice(v.maxPrice);
         if (FEED_MODES[v.feed]) setFeed(v.feed);
         /* the old 5M floor hid $0.50 runners (GCDT .55→.86 never made the
            list) — a saved setup still on that default moves to 2M */
         if (v.minDayVol) setMinDayVol((!v.ver || v.ver < 4) && Number(v.minDayVol) === 5000000 ? 2000000 : v.minDayVol);
-        if (v.alertsOn) setAlertsOn(true);
-        if (v.id && v.secret) setRunning(true);
+        if (v.alertsOn) { alertsOnRef.current = true; setAlertsOn(true); }
+        if (v.id && v.secret) {
+          setPushConnection({ keys: { id: v.id, secret: v.secret, ...(v.code ? { code: v.code } : {}) }, feed: FEED_MODES[v.feed] ? v.feed : "sip_delayed" });
+          setRunning(true);
+        }
       }
       try {
         const mr = await window.storage.get("muted-syms");
@@ -2549,13 +2740,7 @@ export default function App() {
         const am = await window.storage.get("alert-mode");
         if (am && am.value === "all") { alertModeRef.current = "all"; setAlertModeState("all"); }
       } catch {}
-      try {
-        if ("serviceWorker" in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration();
-          const sub = reg && (await reg.pushManager.getSubscription());
-          if (sub) setPushArmed(true);
-        }
-      } catch {}
+      setSettingsLoaded(true);
     })();
   }, []);
 
@@ -2568,9 +2753,8 @@ export default function App() {
     const h = PN.addListener("pushNotificationReceived", (n) => { try { notify(n.title || "Scanner alert", n.body || ""); } catch (e) {} });
     return () => { try { (h && h.remove ? h.remove() : Promise.resolve(h).then((x) => x && x.remove && x.remove())); } catch (e) {} };
   }, []);
-  const pushArmedRef = useRef(false);
-  useEffect(() => { pushArmedRef.current = pushArmed; }, [pushArmed]);
   useEffect(() => {
+    if (!settingsLoaded) return;
     (async () => {
       try {
         const r0 = await window.storage.get("alpaca-keys");
@@ -2581,7 +2765,32 @@ export default function App() {
         fetch("/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alertsOn }) }).catch(() => {});
       } catch {}
     })();
-  }, [alertsOn]);
+  }, [alertsOn, settingsLoaded]);
+
+  /* An installed PWA can retain its subscription while a restarted server
+     has lost the matching record. Reconcile quietly whenever the app returns
+     and once a minute while enabled. Recovery never asks for permission. */
+  useEffect(() => {
+    if (!settingsLoaded || !deviceReady || !alertsOn || !pushConnection) return;
+    const recovery = pushRecoveryRef.current;
+    recovery.enable();
+    const recover = () => { if (alertsOnRef.current) recovery.reconcile(); };
+    const foreground = () => { if (document.visibilityState === "visible") recover(); };
+    recover();
+    window.addEventListener("online", recover);
+    window.addEventListener("pageshow", recover);
+    document.addEventListener("visibilitychange", foreground);
+    const timer = setInterval(recover, 60000);
+    const nativeApp = NATIVE() && capPlugin("App");
+    const h = nativeApp && nativeApp.addListener("appStateChange", (s) => { if (s.isActive) recover(); });
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("online", recover);
+      window.removeEventListener("pageshow", recover);
+      document.removeEventListener("visibilitychange", foreground);
+      if (h) Promise.resolve(h).then((x) => x.remove()).catch(() => {});
+    };
+  }, [settingsLoaded, deviceReady, alertsOn, pushConnection]);
 
   /* alert engine: in-app banner + sound; lock-screen via server Web Push */
   const notify = useCallback((title, body) => {
@@ -2613,68 +2822,39 @@ export default function App() {
     if (alertsOnRef.current) notify(title, body);
   }, [notify]);
 
-  /* enable alerts: register SW + Web Push subscription with the server */
+  /* In-app alerts turn on immediately; lock-screen readiness follows the
+     server acknowledgement. Tapping off invalidates any recovery in flight. */
   const toggleAlerts = async () => {
-    if (alertsOn) {
+    const attempt = ++alertToggleAttemptRef.current;
+    const recovery = pushRecoveryRef.current;
+    if (alertsOnRef.current) {
+      alertsOnRef.current = false;
       setAlertsOn(false);
-      setPushArmed(false);
-      try {
-        let endpoint = null;
-        if ("serviceWorker" in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration();
-          const sub = reg && (await reg.pushManager.getSubscription());
-          if (sub) { endpoint = sub.endpoint; try { await sub.unsubscribe(); } catch (e) {} }
-        }
-        await fetch("/push/unregister", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint, device: DEVICE.id || undefined }) });
-      } catch (e) {}
+      setPushWarn(false);
+      try { await recovery.disable(); }
+      catch (e) { if (!alertsOnRef.current) setPushSyncError("Could not confirm lock-screen alerts were disabled. Reconnect and turn the bell on, then off again."); }
       return;
     }
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       audioRef.current = new Ctx();
     } catch (e) {}
-    let armed = false;
-    let denied = false;
-    try {
-      if (NATIVE() && capPlugin("PushNotifications")) {
-        const tok = await nativePushToken();
-        if (tok) {
-          const r = await fetch("/push/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apns: tok, device: DEVICE.id || undefined }) });
-          armed = r.ok;
-        } else denied = true;
-      } else if ("serviceWorker" in navigator && "PushManager" in window && "Notification" in window) {
-        const reg = await navigator.serviceWorker.register("/sw.js");
-        const perm = await Notification.requestPermission();
-        if (perm === "granted") {
-          const pk = await (await fetch("/push/pubkey")).json();
-          const raw = atob(pk.key.replace(/-/g, "+").replace(/_/g, "/"));
-          const arr = new Uint8Array(raw.length);
-          for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
-          const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: arr });
-          await fetch("/push/register", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ subscription: sub, keys, feed, device: DEVICE.id || undefined }),
-          });
-          armed = true;
-        }
-      } else if ("Notification" in window && Notification.permission === "default") {
-        await Notification.requestPermission();
-      }
-    } catch (e) {}
-    setPushArmed(armed);
+    alertsOnRef.current = true;
     setAlertsOn(true);
+    recovery.enable();
+    const armed = await recovery.reconcile({ requestPermission: true });
+    if (!alertsOnRef.current || attempt !== alertToggleAttemptRef.current) return;
     notify(armed ? "🔔 Lock-screen alerts armed" : "🔔 In-app alerts on",
-      armed ? "The server is now watching the tape and will push to this device."
-        : denied ? "Allow notifications for Momentum Scanner in iOS Settings to get lock-screen push."
-        : NATIVE() ? "Lock-screen push is not available on this server yet."
-        : "Add to Home Screen (iOS) or use desktop/Android for lock-screen push.");
+      armed ? "The server accepted this device and its watchlist."
+        : "Lock-screen push is not ready. See the connection message above; recovery retries automatically.");
   };
 
   /* Full-market sweep on the consolidated tape */
   const sweep = useCallback(async () => {
     if (sweepBusy.current) return;
     sweepBusy.current = true;
+    sweepReadyRef.current = false;
+    let sweepFailed = false;
     try {
       if (!universeRef.current) {
         /* universe is cached for 24h — the big asset download happens once a day */
@@ -2766,7 +2946,7 @@ export default function App() {
           }
           candRef.current = { ...cands };
           hotRef.current = Object.keys(cands).sort((a, b) => cands[b].pct - cands[a].pct).slice(0, pmMode ? 45 : 30);
-        } catch (e) {}
+        } catch (e) { sweepFailed = true; }
         doneSyms += batch.length;
         setNote(`Sweeping the tape: ${Math.min(doneSyms, uni.length).toLocaleString()} / ${uni.length.toLocaleString()} symbols…`);
       };
@@ -2805,7 +2985,7 @@ export default function App() {
                 else { c.prevClose = adj; c.pct = pct; }
               }
             }
-          } catch (e) {}
+          } catch (e) { sweepFailed = true; }
         }
         candRef.current = { ...cands };
         hotRef.current = Object.keys(cands).sort((a, b) => cands[b].pct - cands[a].pct).slice(0, 45);
@@ -2834,7 +3014,7 @@ export default function App() {
                  top-10 ranking of everything that printed after the close */
               ahc[s] = { symbol: s, price: p, pct, close: db.c };
             }
-          } catch (e) {}
+          } catch (e) { sweepFailed = true; }
         }
         /* verify the leaders' REAL tape: 1-min bars from 16:00 give true
            cumulative AH volume — illiquid one-print names are dropped, and
@@ -2855,10 +3035,11 @@ export default function App() {
               for (const b of arr) if (etDay(b.t) === today && etMinutes(b.t) >= 960) { v += b.v; tape.push(normBar(b)); }
               if (v >= AH_MIN_VOL) verified.push({ ...c, ahVol: v, ahBars: tape });
             }
-          } catch (e) {}
+          } catch (e) { sweepFailed = true; }
         }
         ahCandRef.current = verified.sort((a, b) => b.pct - a.pct).slice(0, 15);
       } else ahCandRef.current = [];
+      sweepReadyRef.current = !sweepFailed;
       setFound(Object.keys(cands).length);
       setNote("");
       if (refreshRef.current) refreshRef.current(); /* rows appear the moment the sweep lands */
@@ -3075,15 +3256,43 @@ export default function App() {
     if (busy.current) return;
     busy.current = true;
     try {
+      const complete = (top, bm = {}, pm = {}) => {
+        gainersRef.current = top;
+        setGainers(top);
+        setBarsMap(bm);
+        if (inAfterHours() && ignScanRef.current) ignScanRef.current(); /* AH table updates in the same beat */
+        setPmMap(pm);
+        setUpdated(new Date());
+        setErr("");
+        /* the server monitor watches exactly this list — nothing else */
+        try {
+          fetch("/push/status").then((r) => r.json()).then((st2) => {
+            setPushWarn(!!(st2 && ((st2.lastError && Date.now() - st2.lastError.t < 10 * 60000) ||
+              (st2.monitor && st2.monitor.lastError) || (st2.storage && st2.storage.writable === false))));
+            if (alertsOnRef.current && st2 && st2.devices === 0) pushRecoveryRef.current.reconcile();
+          }).catch(() => {});
+          watchPoolRef.current = [...new Set([...top.map((x) => x.symbol), ...watchAllRef.current, ...ahRef.current])];
+          watchReadyRef.current = true;
+          syncWatch(); /* muted symbols never reach the push monitor */
+        } catch (e) {}
+      };
+      let moversReady = false;
       let hot = hotRef.current;
       try {
         const mv = await alpaca("/v1beta1/screener/stocks/movers", { top: 50 }, keys);
+        moversReady = true;
         const extra = (mv.gainers || []).map((g) => g.symbol)
           .filter((s) => !hot.includes(s) && (!uniSetRef.current || uniSetRef.current.has(s)));
         moversRef.current = extra; /* fresh movers feed AH scanning too */
         hot = hot.concat(extra).slice(0, 45);
       } catch (e) {}
-      if (hot.length === 0) return;
+      if (hot.length === 0) {
+        if (sweepReadyRef.current && moversReady) {
+          watchAllRef.current = [];
+          complete([]);
+        }
+        return;
+      }
       const pmMode = inPremarket();
       const today = etDay(Date.now());
       const ranked = [];
@@ -3123,7 +3332,10 @@ export default function App() {
       watchAllRef.current = movers25.slice(0, 30).map((g) => g.symbol);
       let pool = movers25.slice(0, 25);
       const syms = pool.map((g) => g.symbol);
-      if (syms.length === 0) return;
+      if (syms.length === 0) {
+        if (!pmMode || sweepReadyRef.current) complete([]);
+        return;
+      }
       const bj = await alpaca("/v2/stocks/bars", barParams(feed, {
         symbols: syms.join(","), timeframe: "5Min", start: todayETStartISO(SESSION_START_ET), limit: 10000,
       }), keys);
@@ -3160,21 +3372,7 @@ export default function App() {
       }
       pool.sort((a, b) => b.score - a.score || b.pct - a.pct);
       const top = pool.slice(0, 15);
-      gainersRef.current = top;
-      setGainers(top);
-      setBarsMap(bm);
-      if (inAfterHours() && ignScanRef.current) ignScanRef.current(); /* AH table updates in the same beat */
-      setPmMap(pm);
-      setUpdated(new Date());
-      setErr("");
-      /* the server monitor watches exactly this list — nothing else */
-      try {
-        fetch("/push/status").then((r) => r.json()).then((st2) => {
-          setPushWarn(!!(st2 && st2.lastError && Date.now() - st2.lastError.t < 10 * 60000));
-        }).catch(() => {});
-        watchPoolRef.current = [...new Set([...top.map((x) => x.symbol), ...watchAllRef.current, ...ahRef.current])];
-        syncWatch(); /* muted symbols never reach the push monitor */
-      } catch (e) {}
+      complete(top, bm, pm);
     } catch (e) {
       setErr(String(e.message || e));
     } finally {
@@ -3282,6 +3480,7 @@ export default function App() {
       await alpaca("/v2/stocks/bars", barParams(feed, {
         symbols: "AAPL", timeframe: "1Day", start: daysAgoISO(6), limit: 10, adjustment: "split",
       }), keys);
+      setPushConnection({ keys: { ...keys }, feed });
       if (remember) {
         try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 4 })); } catch {}
         try {
@@ -3450,7 +3649,7 @@ export default function App() {
         </span>
         <button onClick={toggleAlerts} aria-label={alertsOn ? "alerts on — tap to switch off" : "alerts off — tap to switch on"}
           style={{ background: alertsOn ? C.amber + "22" : "transparent", border: `1px solid ${alertsOn ? C.amber : C.border}`, color: alertsOn ? C.amber : C.muted, borderRadius: 8, height: 44, padding: "0 14px", cursor: "pointer", fontSize: 12, fontFamily: MONO, display: "flex", alignItems: "center", gap: 6, touchAction: "manipulation" }}>
-          <BellIcon muted={!alertsOn} /> {alertsOn ? (pushArmed ? "Lock-screen" : "On") : "Off"}
+          <BellIcon muted={!alertsOn} /> {alertsOn ? (pushArmed ? "Lock-screen" : "In-app only") : "Off"}
         </button>
         <button onClick={() => setAlertCenter(true)}
           aria-label={jHit == null ? "push follow-through: no pushes recorded yet" : `push follow-through: ${jHit}% green 15 minutes after the push, ${jStats.n} pushes over 20 days`}
@@ -3513,9 +3712,11 @@ export default function App() {
           )}
         </div>
       )}
-      {pushWarn && (
-        <div style={{ margin: "8px 14px 0", padding: "6px 12px", border: `1px dashed ${C.amber}66`, borderRadius: 6, color: C.amber, fontSize: 11, fontFamily: MONO }}>
-          ⚠ lock-screen push is failing — toggle the 🔔 bell off and on to re-arm
+      {(pushSyncError || (alertsOn && (!pushArmed || pushWarn))) && (
+        <div role="status" style={{ margin: "8px 14px 0", padding: "6px 12px", border: `1px dashed ${C.amber}66`, borderRadius: 6, color: C.amber, fontSize: 11, fontFamily: MONO }}>
+          {pushSyncError ? `⚠ ${alertsOn ? "In-app alerts only. " : ""}${pushSyncError}${alertsOn ? " Retrying automatically." : ""}`
+            : !pushArmed ? "Restoring lock-screen alerts… In-app alerts are on."
+            : "⚠ The server reports a push delivery or monitoring problem. In-app alerts remain on; reconnection is automatic."}
         </div>
       )}
       {alertCenter && (

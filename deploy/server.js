@@ -18,6 +18,25 @@ const path = require("path");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 8787;
+/* Point this at a persistent mount for delivery while the phone stays closed
+   across deploys. The default preserves existing local installations. */
+const STATE_DIR = process.env.SCANNER_STATE_DIR || "/tmp";
+const storageErrors = new Set();
+function saveState(file, value) {
+  const temporary = file + "." + process.pid + ".tmp";
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+    fs.renameSync(temporary, file);
+    storageErrors.delete(file);
+    return true;
+  } catch (e) {
+    storageErrors.add(file);
+    try { fs.unlinkSync(temporary); } catch (ignored) {}
+    console.error("Scanner state could not be saved:", path.basename(file));
+    return false;
+  }
+}
 /* upstream feed is overridable so the whole stack stays feed-agnostic —
    swapping Alpaca for a licensed vendor later is an env change here */
 const DATA = process.env.ALPACA_DATA_URL || "https://data.alpaca.markets";
@@ -31,7 +50,7 @@ const PUSH_SYM_DAILY_CAP = Number(process.env.PUSH_SYM_DAILY_CAP || 4);
    rule, no hourly cap — for traders who want the raw tape */
 const ALL_OPTS = { minTier: 1, lunch: false, dailyCap: Number(process.env.ALL_SYM_DAILY_CAP || 12), minPrice: Number(process.env.ALL_MIN_PRICE || 0.25) };
 const MIN_PUSH_PRICE = Number(process.env.MIN_PUSH_PRICE || 0.5);
-const JOURNAL_FILE = "/tmp/scanner-journal.json";
+const JOURNAL_FILE = path.join(STATE_DIR, "scanner-journal.json");
 /* ---- AI trade plans ---- */
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const ANTHROPIC_URL = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/$/, "");
@@ -42,8 +61,10 @@ const PLAN_TTL_MS = 5 * 60000;
    the hosting proxy kills idle requests around 100s, and a thinking model can
    take longer than that, so the client polls instead of waiting on one call */
 const PLAN_WAIT_MS = Number(process.env.PLAN_WAIT_MS) || 20000;
-const SUBS_FILE = "/tmp/scanner-subs.json";
-const DEVICES_FILE = "/tmp/scanner-devices.json";
+const SUBS_FILE = path.join(STATE_DIR, "scanner-subs.json");
+const DEVICES_FILE = path.join(STATE_DIR, "scanner-devices.json");
+const VAPID_FILE = path.join(STATE_DIR, "scanner-vapid.json");
+const INSTANCE_ID = crypto.randomUUID();
 
 /* SERVER-KEYS MODE (Phase 1 of the App Store plan): when both APCA_* env
    vars are set on the server, users never enter API keys — the proxy
@@ -78,21 +99,36 @@ function fetchJSON(url, headers) {
 /* ============================ VAPID keys ============================ */
 let vapid;
 function loadVapid() {
+  const restore = (jwk, raw) => {
+    const priv = crypto.createPrivateKey({ key: jwk, format: "jwk" });
+    const pub = crypto.createPublicKey(priv).export({ format: "jwk" });
+    const derived = Buffer.concat([Buffer.from([4]), fromB64u(pub.x), fromB64u(pub.y)]);
+    if (pub.crv !== "P-256" || !derived.equals(fromB64u(raw))) throw new Error("VAPID public/private key mismatch");
+    vapid = { priv, pubRaw: derived };
+  };
   if (process.env.VAPID_PRIVATE_JWK && process.env.VAPID_PUBLIC_RAW) {
-    const priv = crypto.createPrivateKey({ key: JSON.parse(process.env.VAPID_PRIVATE_JWK), format: "jwk" });
-    vapid = { priv, pubRaw: fromB64u(process.env.VAPID_PUBLIC_RAW) };
+    try { restore(JSON.parse(process.env.VAPID_PRIVATE_JWK), process.env.VAPID_PUBLIC_RAW); }
+    catch (e) { throw new Error("Configured VAPID identity is invalid or mismatched"); }
     console.log("VAPID keys loaded from env.");
     return;
+  }
+  if (process.env.VAPID_PRIVATE_JWK || process.env.VAPID_PUBLIC_RAW) throw new Error("Both VAPID environment variables are required");
+  try {
+    const saved = JSON.parse(fs.readFileSync(VAPID_FILE, "utf8"));
+    restore(saved.privateJwk, saved.publicRaw);
+    console.log("VAPID keys restored from scanner state.");
+    return;
+  } catch (e) {
+    if (e.code !== "ENOENT") throw new Error("Saved VAPID identity could not be loaded; refusing to replace it");
   }
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const jwk = publicKey.export({ format: "jwk" });
   const pubRaw = Buffer.concat([Buffer.from([4]), fromB64u(jwk.x), fromB64u(jwk.y)]);
   vapid = { priv: privateKey, pubRaw };
-  const privJwk = JSON.stringify(privateKey.export({ format: "jwk" }));
-  console.log("\n*** Generated new VAPID keys (subscriptions reset on every restart). ***");
-  console.log("To persist them, add these environment variables in Render:");
-  console.log("VAPID_PRIVATE_JWK=" + privJwk);
-  console.log("VAPID_PUBLIC_RAW=" + b64u(pubRaw) + "\n");
+  if (!saveState(VAPID_FILE, { privateJwk: privateKey.export({ format: "jwk" }), publicRaw: b64u(pubRaw) })) {
+    throw new Error("VAPID identity could not be saved");
+  }
+  console.log("VAPID identity created in scanner state; use a persistent mount to retain it across deploys.");
 }
 loadVapid();
 
@@ -237,6 +273,7 @@ function sendPush(sub, payloadObj) {
         resolve(res.statusCode);
       });
       req2.on("error", () => resolve(0));
+      req2.setTimeout(8000, () => { req2.destroy(); resolve(0); });
       req2.end(body);
     } catch (e) { resolve(0); }
   });
@@ -252,7 +289,7 @@ try {
   if (Array.isArray(saved)) subs = saved;
   else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
 } catch (e) {}
-function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
+function saveSubs() { return saveState(SUBS_FILE, { subs, watch, watchPrefs, watchMode }); }
 
 /* per-ticker alert-category filtering: the alert key encodes its category */
 const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
@@ -268,7 +305,7 @@ async function broadcast(title, bodyTxt, key) {
   const dead = [];
   for (const s of subs) {
     const code = await sendPush(s.sub, { title, body: bodyTxt, key: key || "" });
-    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
+    if (code === 0 || code >= 400) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) dead.push(s.sub.endpoint);
   }
   if (dead.length) { subs = subs.filter((s) => !dead.includes(s.sub.endpoint)); saveSubs(); }
@@ -277,7 +314,7 @@ async function broadcast(title, bodyTxt, key) {
 /* ============================ per-device accounts (server-keys mode) ==== */
 let devices = {}; // id -> { symbols: [], sub: push subscription|null, t }
 try { devices = JSON.parse(fs.readFileSync(DEVICES_FILE, "utf8")) || {}; } catch (e) {}
-function saveDevices() { try { fs.writeFileSync(DEVICES_FILE, JSON.stringify(devices)); } catch (e) {} }
+function saveDevices() { return saveState(DEVICES_FILE, devices); }
 const deviceOk = (id) => !!(id && typeof id === "string" && devices[id]);
 function watchUnion() {
   const set = new Set(watch);
@@ -296,7 +333,7 @@ async function sendAlert(sym, title, bodyTxt, key, mode) {
     if (!d.sub || !(d.symbols || []).includes(sym) || !prefAllows(d.prefs, sym, key)) continue;
     if (mode && modeOf(d) !== mode) continue;
     const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
-    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
+    if (code === 0 || code >= 400) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) { d.sub = null; changed = true; }
   }
   if (changed) saveDevices();
@@ -319,7 +356,7 @@ async function sendLevelAlert(sym, L, title, bodyTxt, key) {
   for (const d of Object.values(devices)) {
     if (!d.sub || !hasL(d.prefs)) continue;
     const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
-    if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
+    if (code === 0 || code >= 400) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) { d.sub = null; changed = true; }
   }
   if (changed) saveDevices();
@@ -593,7 +630,7 @@ function backtestSymbol(arr, prevClose, opts) {
    the tiers. Filled from the same session bars the monitor already holds. */
 let journal = [];
 try { journal = JSON.parse(fs.readFileSync(JOURNAL_FILE, "utf8")) || []; } catch (e) {}
-function saveJournal() { try { fs.writeFileSync(JOURNAL_FILE, JSON.stringify(journal.slice(-600))); } catch (e) {} }
+function saveJournal() { return saveState(JOURNAL_FILE, journal.slice(-600)); }
 function journalAdd(e) { journal.push(e); if (journal.length > 600) journal = journal.slice(-600); }
 function journalUpdate(sym, arr) {
   for (const e of journal) {
@@ -640,55 +677,86 @@ async function sendDigest(items) {
     const m = items.filter((i) => (d.symbols || []).includes(i.sym) && prefAllows(d.prefs, i.sym, key));
     if (!m.length) continue;
     const code = await sendPush(d.sub, { title: `📋 ${m.length} more setup${m.length > 1 ? "s" : ""}`, body: line(m), key });
+    if (code === 0 || code >= 400) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) { d.sub = null; changed = true; }
   }
   if (changed) saveDevices();
 }
 
-const MONSTATE_FILE = "/tmp/scanner-monstate.json";
+const MONSTATE_FILE = path.join(STATE_DIR, "scanner-monstate.json");
 const monState = { fired: new Set(), sym: {}, day: null };
 try {
   const ms = JSON.parse(fs.readFileSync(MONSTATE_FILE, "utf8"));
   monState.day = ms.day || null;
   monState.fired = new Set(ms.fired || []);
   monState.sym = ms.sym || {};
+  for (const key of ["hour", "hourN", "digest", "digestAt"]) if (ms[key] != null) monState[key] = ms[key];
   console.log("monitor state restored:", monState.fired.size, "fired keys");
 } catch (e) {}
 function saveMonState() {
-  try {
-    fs.writeFileSync(MONSTATE_FILE, JSON.stringify({
-      day: monState.day, fired: [...monState.fired].slice(-800), sym: monState.sym,
-    }));
-  } catch (e) {}
+  return saveState(MONSTATE_FILE, {
+    ...monState, fired: [...monState.fired].slice(-800),
+  });
+}
+const monitorStatus = { running: false, lastAttempt: null, lastSuccess: null, lastError: null, reason: "not_started" };
+async function fetchMonitorBars(batch, start, feed, headers) {
+  const bars = {};
+  const seen = new Set();
+  let token;
+  do {
+    const params = new URLSearchParams({ symbols: batch.join(","), timeframe: "1Min", start, limit: "10000", feed });
+    if (token) params.set("page_token", token);
+    const response = await fetch(`${DATA}/v2/stocks/bars?${params}`, { headers, signal: AbortSignal.timeout(15000) });
+    if (!response.ok) {
+      const error = new Error("Market data request failed");
+      error.status = response.status;
+      throw error;
+    }
+    const page = await response.json();
+    if (!page || !page.bars || typeof page.bars !== "object") throw new Error("Invalid market data response");
+    for (const sym of batch) if (Array.isArray(page.bars[sym])) (bars[sym] || (bars[sym] = [])).push(...page.bars[sym]);
+    token = page.next_page_token;
+    if (token && (typeof token !== "string" || seen.has(token))) throw new Error("Invalid market data pagination");
+    if (token) seen.add(token);
+  } while (token);
+  return bars;
 }
 async function monitorTick() {
+  if (monitorStatus.running) return;
   let H, feed;
   if (SERVER_KEYS) {
-    if (subs.length === 0 && !Object.values(devices).some((d) => d.sub)) return;
+    if (subs.length === 0 && !Object.values(devices).some((d) => d.sub)) { monitorStatus.reason = "no_subscriptions"; return; }
     H = { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY };
     feed = SERVER_FEED;
   } else {
-    if (subs.length === 0) return;
+    if (subs.length === 0) { monitorStatus.reason = "no_subscriptions"; return; }
     const cfg = subs[subs.length - 1]; // latest registration carries the API keys
     H = { "APCA-API-KEY-ID": cfg.keys.id, "APCA-API-SECRET-KEY": cfg.keys.secret };
     feed = cfg.feed === "sip" ? "sip" : "iex"; // real-time only for triggers
   }
   const day = etDay(Date.now());
   if (monState.day !== day) { monState.fired = new Set(); monState.sym = {}; monState.day = day; }
+  monitorStatus.running = true;
+  monitorStatus.lastAttempt = Date.now();
+  monitorStatus.reason = "checking";
+  let failed = false;
   try {
     /* monitor covers the shared list plus every claimed device's list */
     const pool = (SERVER_KEYS ? watchUnion() : watch).slice(0, SERVER_KEYS ? 80 : 40);
-    if (pool.length === 0) return;
+    if (pool.length === 0) { monitorStatus.reason = "no_watchlist"; return; }
     const start = sessionStartISO(); /* full premarket window — PMH and baselines track from the 4:00 AM open */
     const nowMs = Date.now();
     for (let i = 0; i < pool.length; i += 15) {
       const batch = pool.slice(i, i + 15);
-      const j = await fetchJSON(
-        `${DATA}/v2/stocks/bars?symbols=${batch.join(",")}&timeframe=1Min&start=${encodeURIComponent(start)}&limit=10000&feed=${feed}`, H
-      ).catch(() => null);
-      if (!j) continue;
+      let bars;
+      try { bars = await fetchMonitorBars(batch, start, feed, H); }
+      catch (e) {
+        failed = true;
+        monitorStatus.lastError = { t: Date.now(), code: Number(e.status) || 0, stage: "market_data" };
+        continue;
+      }
       for (const s of batch) {
-        const arr = ((j.bars && j.bars[s]) || []).map((b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
+        const arr = (bars[s] || []).map((b) => ({ t: new Date(b.t).getTime(), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }));
         const st = monState.sym[s] || (monState.sym[s] = {});
         const px = arr.length ? arr[arr.length - 1].c : null;
         for (const trig of computeTriggers(s, arr, st, nowMs)) {
@@ -741,16 +809,24 @@ async function monitorTick() {
       const items = monState.digest; monState.digest = []; monState.digestAt = nowMs;
       await sendDigest(items);
     }
-  } catch (e) { console.log("monitor error:", String(e).slice(0, 120)); }
-  saveMonState();
-  saveJournal();
+    monitorStatus.reason = failed ? "market_data_error" : "watching";
+    if (!failed) { monitorStatus.lastSuccess = Date.now(); monitorStatus.lastError = null; }
+  } catch (e) {
+    monitorStatus.reason = "monitor_error";
+    monitorStatus.lastError = { t: Date.now(), code: 0, stage: "monitor" };
+    console.error("Alert monitor failed; see /push/status.");
+  } finally {
+    saveMonState();
+    saveJournal();
+    monitorStatus.running = false;
+  }
 }
 const monitorTimer = setInterval(monitorTick, 45000);
 /* Render rolling deploys briefly run OLD + NEW instances together; the old
    one must stop pushing the instant it is told to shut down */
 process.on("SIGTERM", () => {
   clearInterval(monitorTimer);
-  try { saveMonState(); saveSubs(); } catch (e) {}
+  try { saveMonState(); saveSubs(); saveDevices(); saveJournal(); saveSettings(); } catch (e) {}
   process.exit(0);
 });
 
@@ -943,10 +1019,10 @@ async function generatePlan(sym, pack) {
 }
 
 /* ============================ settings persistence ============================ */
-const SETTINGS_FILE = "/tmp/scanner-settings.json";
+const SETTINGS_FILE = path.join(STATE_DIR, "scanner-settings.json");
 let settings = {};
 try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
-function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
+function saveSettings() { return saveState(SETTINGS_FILE, settings); }
 
 /* ============================ static assets ============================ */
 const SW_JS = `self.addEventListener("push", (e) => {
@@ -1130,7 +1206,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (!devices[id] && Object.keys(devices).length >= MAX_DEVICES) throw new Error("device limit reached");
-      devices[id] = devices[id] || { symbols: [], sub: null, t: Date.now() };
+      const previous = devices[id];
+      devices[id] = previous ? { ...previous } : { symbols: [], sub: null, t: Date.now() };
       if (b.account && typeof b.account === "object") {
         /* preview accounts: remembered per device so the operator can see who is on which plan */
         devices[id].acct = {
@@ -1139,7 +1216,10 @@ const server = http.createServer(async (req, res) => {
           plan: b.account.plan === "pro" ? "pro" : "free",
         };
       }
-      saveDevices();
+      if (!saveDevices()) {
+        if (previous) devices[id] = previous; else delete devices[id];
+        throw new Error("Could not save device claim");
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } catch (e) {
@@ -1170,7 +1250,8 @@ const server = http.createServer(async (req, res) => {
   if (u === "/push/status") {
     const devSubs = Object.values(devices).filter((d) => d.sub).length;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ devices: subs.length + devSubs, watch: (SERVER_KEYS ? watchUnion() : watch).length, lastError: lastPushErr }));
+    res.end(JSON.stringify({ devices: subs.length + devSubs, watch: (SERVER_KEYS ? watchUnion() : watch).length, lastError: lastPushErr,
+      instanceId: INSTANCE_ID, monitor: monitorStatus, storage: { directoryConfigured: !!process.env.SCANNER_STATE_DIR, writable: storageErrors.size === 0 } }));
     return;
   }
   if (u === "/push/pubkey") {
@@ -1191,8 +1272,9 @@ const server = http.createServer(async (req, res) => {
       if (SERVER_KEYS && b.device) {
         /* per-device: this device's subscription only (must be claimed) */
         if (!deviceOk(b.device)) throw new Error("device not authorized");
-        devices[b.device].sub = b.subscription;
-        saveDevices();
+        const previous = devices[b.device];
+        devices[b.device] = { ...previous, sub: b.subscription };
+        if (!saveDevices()) { devices[b.device] = previous; throw new Error("Could not save push registration"); }
         console.log("push registered for device — devices with push:", Object.values(devices).filter((d) => d.sub).length);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, devices: 1 }));
@@ -1200,8 +1282,9 @@ const server = http.createServer(async (req, res) => {
       }
       /* single-user app: a new registration replaces ALL prior subscriptions.
          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
+      const previous = subs;
       subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
-      saveSubs();
+      if (!saveSubs()) { subs = previous; throw new Error("Could not save push registration"); }
       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, devices: subs.length }));
@@ -1217,18 +1300,20 @@ const server = http.createServer(async (req, res) => {
       const syms = (b.symbols || []).filter((s) => typeof s === "string").slice(0, 40);
       if (SERVER_KEYS && b.device) {
         if (!deviceOk(b.device)) throw new Error("device not authorized");
-        devices[b.device].symbols = syms; /* this device's own watchlist */
+        const previous = devices[b.device];
+        devices[b.device] = { ...previous, symbols: syms }; /* this device's own watchlist */
         if (b.prefs && typeof b.prefs === "object") devices[b.device].prefs = b.prefs;
         if (b.mode) devices[b.device].mode = b.mode === "all" ? "all" : "rec";
-        saveDevices();
+        if (!saveDevices()) { devices[b.device] = previous; throw new Error("Could not save watchlist"); }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, watching: syms.length }));
         return;
       }
+      const previous = { watch, watchPrefs, watchMode };
       watch = syms;
       if (b.prefs && typeof b.prefs === "object") watchPrefs = b.prefs;
       if (b.mode) watchMode = b.mode === "all" ? "all" : "rec";
-      saveSubs();
+      if (!saveSubs()) { ({ watch, watchPrefs, watchMode } = previous); throw new Error("Could not save watchlist"); }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));
     } catch (e) {
@@ -1241,15 +1326,17 @@ const server = http.createServer(async (req, res) => {
     try {
       const b = JSON.parse(await readBody(req));
       if (SERVER_KEYS && b.device && devices[b.device]) {
-        devices[b.device].sub = null; /* this device only */
-        saveDevices();
+        const previous = devices[b.device];
+        devices[b.device] = { ...previous, sub: null }; /* this device only */
+        if (!saveDevices()) { devices[b.device] = previous; throw new Error("Could not save push removal"); }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, devices: 0 }));
         return;
       }
+      const previous = subs;
       if (b.endpoint) subs = subs.filter((s) => s.sub.endpoint !== b.endpoint);
       else subs = []; /* single-user app: bell off = full silence */
-      saveSubs();
+      if (!saveSubs()) { subs = previous; throw new Error("Could not save push removal"); }
       console.log("push unregistered —", subs.length, "device(s) remain");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, devices: subs.length }));
@@ -1382,4 +1469,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`\n  Momentum scanner running → http://localhost:${PORT}\n`));
 
-module.exports = { computeTriggers, encryptPayload, vapidJWT, apnsJWT, apnsPayload, sendPush, sendAlert, devices, APNS, setupSignals, tierOf, setupGate, backtestSymbol, ALL_OPTS, sanitizePlan, journalStats, pivots };
+module.exports = { computeTriggers, encryptPayload, vapidJWT, apnsJWT, apnsPayload, sendPush, sendAlert, devices, APNS, setupSignals, tierOf, setupGate, backtestSymbol, ALL_OPTS, sanitizePlan, journalStats, pivots, monitorTick, fetchMonitorBars, monitorStatus };
