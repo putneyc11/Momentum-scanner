@@ -137,6 +137,12 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   const storedPrefs = await page.evaluate(() => localStorage.getItem('alert-prefs'));
   console.log(storedPrefs && storedPrefs.includes('2.5') ? '✓ level persisted to alert-prefs storage' : '✗ prefs not persisted: ' + JSON.stringify(storedPrefs));
   // switch one alert category off for this ticker
+  await page.route('**/backtest', (r) => r.fulfill({ json: { symbol: 'GOODA', prevClose: 0.42, bars: 120, hi: 0.86, lo: 0.55, run: 56,
+    entered: { rec: TARGET - 3600e3, all: TARGET - 3600e3 }, pushes: { old: [], rec: [{ t: TARGET - 3500e3, price: 0.61, title: '⚡ setup 3/5', tier: 2, kind: 'setup', arrival: true }], all: [{ t: TARGET - 3540e3, price: 0.58, title: 'reclaimed VWAP', tier: 0, kind: 'vwap' }, { t: TARGET - 3500e3, price: 0.61, title: '⚡ setup 3/5', tier: 2, kind: 'setup', arrival: true }] } } }));
+  await page.click('button[aria-label="replay today\'s tape through the alert rules"]');
+  await page.waitForTimeout(500);
+  const btT = (await page.textContent('#root')).replace(/\s+/g, ' ');
+  console.log(/Old rules.*0 pushes/.test(btT) && /Recommended.*1 push/.test(btT) && /All alerts.*2 pushes/.test(btT) && btT.includes('never made the list') && btT.includes('arrival') ? '✓ tape replay shows old / recommended / all side by side with entry time and pushes' : '✗ replay panel wrong: ' + btT.slice(btT.indexOf("Today's tape"), btT.indexOf("Today's tape") + 300));
   await page.click('button:has-text("VWAP reclaim")');
   await page.waitForTimeout(300);
   const storedPrefs2 = await page.evaluate(() => JSON.parse(localStorage.getItem('alert-prefs') || '{}'));
@@ -164,6 +170,15 @@ function bars1(n){const a=[];for(let i=0;i<n;i++){const c=1+i*.004;a.push({t:new
   // AI trade plan card: idle → Analyze → levels, three scenarios, must-hold / must-fail, disclaimer
   const bP = await page.textContent('#root');
   console.log(bP.includes('AI trade plan') && bP.includes('Nothing is sent until you tap Analyze') ? '✓ AI plan card is idle until asked (nothing sent on open)' : '✗ plan card missing or eager');
+  const abtn = await page.evaluate(() => { const b = document.querySelector('button[aria-label="analyze"]'); const r = b.getBoundingClientRect(); return { h: Math.round(r.height), w: Math.round(r.width) }; });
+  console.log(abtn.h >= 44 && abtn.w >= 44 ? `✓ Analyze is a 44px tap target (${abtn.w}×${abtn.h})` : '✗ Analyze tap target too small: ' + JSON.stringify(abtn));
+  /* the label must flip on touch-down, before any React render */
+  const flipped = await page.evaluate(() => {
+    const b = document.querySelector('button[aria-label="analyze"]');
+    b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }));
+    return b.textContent;
+  });
+  console.log(flipped === 'Analyzing…' ? '✓ label flips to "Analyzing…" synchronously on touch-down (no render needed)' : '✗ no immediate feedback: ' + JSON.stringify(flipped));
   await page.click('button[aria-label="analyze"]');
   await page.waitForTimeout(600);
   const busy = await page.textContent('#root');

@@ -25,8 +25,11 @@ const TRADING = process.env.ALPACA_TRADING_URL || "https://paper-api.alpaca.mark
 const ROUTES = { "/alpaca": DATA, "/trading": TRADING };
 /* ---- confluence push policy (see computeSetup) ---- */
 const LEGACY_PUSH = process.env.LEGACY_PUSH === "1";           // 1 = every single trigger pushes (old behaviour)
-const PUSH_HOURLY_CAP = Number(process.env.PUSH_HOURLY_CAP || 6);
-const PUSH_SYM_DAILY_CAP = Number(process.env.PUSH_SYM_DAILY_CAP || 3);
+const PUSH_HOURLY_CAP = Number(process.env.PUSH_HOURLY_CAP || 10);   // recommended package only; ALL has no hourly cap
+const PUSH_SYM_DAILY_CAP = Number(process.env.PUSH_SYM_DAILY_CAP || 4);
+/* the ALL package: every single-event trigger plus tier-1 setups, no lunch
+   rule, no hourly cap — for traders who want the raw tape */
+const ALL_OPTS = { minTier: 1, lunch: false, dailyCap: Number(process.env.ALL_SYM_DAILY_CAP || 12), minPrice: Number(process.env.ALL_MIN_PRICE || 0.25) };
 const MIN_PUSH_PRICE = Number(process.env.MIN_PUSH_PRICE || 0.5);
 const JOURNAL_FILE = "/tmp/scanner-journal.json";
 /* ---- AI trade plans ---- */
@@ -243,12 +246,13 @@ function sendPush(sub, payloadObj) {
 let subs = [];   // [{ sub, keys:{id,secret}, feed }]
 let watch = [];  // the app's current ranked list — the ONLY symbols monitored
 let watchPrefs = {}; // sym -> { off: [cats], lv: [price levels] } — per-ticker alert prefs
+let watchMode = "rec"; // shared list's alert package: "rec" | "all"
 try {
   const saved = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
   if (Array.isArray(saved)) subs = saved;
-  else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; }
+  else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
 } catch (e) {}
-function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs })); } catch (e) {} }
+function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
 
 /* per-ticker alert-category filtering: the alert key encodes its category */
 const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
@@ -282,11 +286,15 @@ function watchUnion() {
 }
 /* route an alert by INTEREST: the legacy shared list broadcasts as before;
    claimed devices are pushed only for symbols on their own watchlist */
-async function sendAlert(sym, title, bodyTxt, key) {
-  if (watch.includes(sym) && prefAllows(watchPrefs, sym, key)) await broadcast(title, bodyTxt, key);
+const modeOf = (d) => (d && d.mode === "all" ? "all" : "rec");
+const sharedMode = () => (LEGACY_PUSH || watchMode === "all" ? "all" : "rec");
+/* mode: "rec" | "all" | undefined (everyone — halts, price levels) */
+async function sendAlert(sym, title, bodyTxt, key, mode) {
+  if ((!mode || mode === sharedMode()) && watch.includes(sym) && prefAllows(watchPrefs, sym, key)) await broadcast(title, bodyTxt, key);
   let changed = false;
   for (const d of Object.values(devices)) {
     if (!d.sub || !(d.symbols || []).includes(sym) || !prefAllows(d.prefs, sym, key)) continue;
+    if (mode && modeOf(d) !== mode) continue;
     const code = await sendPush(d.sub, { title, body: bodyTxt, key: key || "" });
     if (code >= 400 && code !== 404 && code !== 410) lastPushErr = { t: Date.now(), code };
     if (code === 404 || code === 410) { d.sub = null; changed = true; }
@@ -490,8 +498,8 @@ function setupSignals(arr, nowMs) {
   return { sig, n, price: last.c, vwap: vw, volMult, fresh: nowMs - last.t < 120000, hod: Math.max(hodBefore, recentHi), t: last.t };
 }
 /* 11:30–14:00 ET is chop: one more signal required for every tier */
-function tierOf(n, sig, etMin) {
-  const lunch = etMin >= 690 && etMin < 840;
+function tierOf(n, sig, etMin, lunchRule) {
+  const lunch = lunchRule !== false && etMin >= 690 && etMin < 840;
   const need2 = lunch ? 4 : 3, need3 = lunch ? 5 : 4;
   if (n >= need3 && sig.hod && sig.vol) return 3;
   if (n >= need2) return 2;
@@ -506,20 +514,77 @@ function setupGate(sym, arr, st, nowMs, opts) {
   const day = etDay(nowMs);
   if (st.setupDay !== day) { st.setupDay = day; st.pushes = 0; st.tier = 0; st.legHi = s.price; st.pbLo = s.price; st.lastPush = 0; st.setupInit = false; }
   const etMin = etMinutes(s.t);
-  const tier = tierOf(s.n, s.sig, etMin);
+  const minTier = o.minTier != null ? o.minTier : 2;
+  const minPrice = o.minPrice != null ? o.minPrice : MIN_PUSH_PRICE;
+  const tier = tierOf(s.n, s.sig, etMin, o.lunch);
   if (s.price > (st.legHi || 0)) st.legHi = s.price;
   if (st.pbLo == null || s.price < st.pbLo) st.pbLo = s.price;
-  if (!st.setupInit) { st.setupInit = true; st.tier = tier; return null; } /* baseline: never replay what already happened */
-  if (!s.fresh || tier < 2 || s.price < (o.minPrice != null ? o.minPrice : MIN_PUSH_PRICE)) return null;
+  let arrival = false;
+  if (!st.setupInit) {
+    st.setupInit = true;
+    /* ARRIVAL: a symbol that shows up already in a live setup — new high
+       inside its last three bars, current bar, tier reached — pushes right
+       now. The old silent baseline swallowed exactly the runners that enter
+       the list mid-move (GCDT .55→.86 with no push). A symbol that arrives
+       flat, or whose high is stale, still baselines silently. */
+    arrival = o.arrival !== false && s.fresh && tier >= minTier && s.sig.hod && s.price >= minPrice;
+    if (!arrival) { st.tier = tier; return null; }
+    st.tier = 0;
+  }
+  if (!s.fresh || tier < minTier || s.price < minPrice) return null;
   const newLeg = st.tier > 0 && st.pbLo <= st.legHi * 0.92 && s.price >= st.pbLo * 1.03 && nowMs - (st.lastPush || 0) > 20 * 60000;
   const escalates = tier > st.tier;
   if (!escalates && !newLeg) return null;
   if ((st.pushes || 0) >= (o.dailyCap != null ? o.dailyCap : PUSH_SYM_DAILY_CAP)) return null;
   st.tier = tier; st.pushes = (st.pushes || 0) + 1; st.lastPush = nowMs; st.legHi = s.price; st.pbLo = s.price;
   const on = Object.keys(s.sig).filter((k) => s.sig[k]).map((k) => (k === "vol" ? `vol ${s.volMult.toFixed(1)}×` : SIG_LABEL[k]));
-  const title = tier === 3 ? `🚀 ${sym} breakout ${s.n}/5` : `⚡ ${sym} setup ${s.n}/5`;
-  const body = `${on.join(" · ")}${newLeg ? " · new leg" : ""} @ $${fp(s.price)}`;
-  return { tier, n: s.n, sig: s.sig, price: s.price, newLeg, title, body };
+  const title = tier === 3 ? `🚀 ${sym} breakout ${s.n}/5` : tier === 2 ? `⚡ ${sym} setup ${s.n}/5` : `· ${sym} early ${s.n}/5`;
+  const body = `${on.join(" · ")}${newLeg ? " · new leg" : arrival ? " · just hit the list" : ""} @ $${fp(s.price)}`;
+  return { tier, n: s.n, sig: s.sig, price: s.price, newLeg, arrival, title, body };
+}
+
+/* ============================ tape regression ============================
+   Replays one symbol's session bar by bar through the same gates the live
+   monitor uses, under three rule sets, so a missed move can be checked
+   against what WOULD have pushed. Pure; unit-tested. */
+function backtestSymbol(arr, prevClose, opts) {
+  const o = opts || {};
+  const floorNew = o.floor != null ? o.floor : 2000000, floorOld = 5000000;
+  const modes = {
+    old: { floor: floorOld, gate: { arrival: false, dailyCap: 3 }, legacy: false },
+    rec: { floor: floorNew, gate: {}, legacy: false },
+    all: { floor: floorNew, gate: ALL_OPTS, legacy: true },
+  };
+  const out = { bars: arr.length, entered: {}, pushes: { old: [], rec: [], all: [] }, hi: null, lo: null, run: null };
+  if (!arr.length) return out;
+  const st = { old: {}, rec: {}, all: {} };
+  const trigSt = {};
+  let cum = 0, hi = -Infinity, lo = Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    const b = arr[i];
+    cum += b.v; hi = Math.max(hi, b.h); lo = Math.min(lo, b.l);
+    const pct = prevClose ? ((b.c - prevClose) / prevClose) * 100 : 0;
+    const pm = etMinutes(b.t) < OPEN_ET_MIN;
+    const nowMs = b.t + 60000; /* observed as the bar closes */
+    const win = arr.slice(0, i + 1);
+    for (const m of Object.keys(modes)) {
+      const M = modes[m];
+      /* discovery: the list only carries a symbol once it clears the floor —
+         premarket by gap, regular hours by ≥25% day on the volume floor */
+      const qualifies = pm ? (pct >= 10 && cum >= 25000) : (pct >= 25 && cum >= M.floor);
+      if (!out.entered[m]) { if (!qualifies) continue; out.entered[m] = b.t; }
+      if (M.legacy) {
+        const ts = trigSt[m] || (trigSt[m] = {});
+        for (const t of computeTriggers("X", win, ts, nowMs)) {
+          if (!/-halt-|-resume-/.test(t.key)) out.pushes[m].push({ t: b.t, price: b.c, title: t.title.replace("X ", ""), tier: 0, kind: catOf(t.key) });
+        }
+      }
+      const hit = setupGate("X", win, st[m], nowMs, M.gate);
+      if (hit) out.pushes[m].push({ t: b.t, price: hit.price, title: hit.title.replace("X ", ""), tier: hit.tier, kind: "setup", arrival: !!hit.arrival, newLeg: !!hit.newLeg });
+    }
+  }
+  out.hi = hi; out.lo = lo; out.run = lo > 0 ? ((hi - lo) / lo) * 100 : null;
+  return out;
 }
 
 /* ============================ push journal ============================
@@ -567,11 +632,11 @@ function journalStats(days, rows0) {
 async function sendDigest(items) {
   const key = `digest-setup-${Math.floor(Date.now() / 9e5)}`;
   const line = (arr) => arr.map((i) => `${i.sym} ${i.tier === 3 ? "breakout" : "setup"} $${fp(i.price)}`).join(" · ");
-  const mine = items.filter((i) => watch.includes(i.sym) && prefAllows(watchPrefs, i.sym, key));
+  const mine = sharedMode() === "rec" ? items.filter((i) => watch.includes(i.sym) && prefAllows(watchPrefs, i.sym, key)) : [];
   if (mine.length) await broadcast(`📋 ${mine.length} more setup${mine.length > 1 ? "s" : ""}`, line(mine), key);
   let changed = false;
   for (const d of Object.values(devices)) {
-    if (!d.sub) continue;
+    if (!d.sub || modeOf(d) !== "rec") continue; /* ALL has no cap, so nothing to digest */
     const m = items.filter((i) => (d.symbols || []).includes(i.sym) && prefAllows(d.prefs, i.sym, key));
     if (!m.length) continue;
     const code = await sendPush(d.sub, { title: `📋 ${m.length} more setup${m.length > 1 ? "s" : ""}`, body: line(m), key });
@@ -628,29 +693,34 @@ async function monitorTick() {
         const px = arr.length ? arr[arr.length - 1].c : null;
         for (const trig of computeTriggers(s, arr, st, nowMs)) {
           if (monState.fired.has(trig.key)) continue;
-          /* single-condition triggers only push in legacy mode; halts always do */
+          /* halts go to everyone; single-condition triggers are the ALL package */
           const cat = catOf(trig.key);
-          if (!LEGACY_PUSH && cat !== "halt") continue;
           monState.fired.add(trig.key);
-          console.log("PUSH:", trig.title);
-          await sendAlert(s, trig.title, trig.body, trig.key);
-          if (cat !== "halt") journalAdd({ t: nowMs, sym: s, tier: 0, kind: cat, price: px });
+          console.log(cat === "halt" ? "PUSH:" : "PUSH(all):", trig.title);
+          await sendAlert(s, trig.title, trig.body, trig.key, cat === "halt" ? undefined : "all");
+          if (cat !== "halt") journalAdd({ t: nowMs, sym: s, tier: 0, kind: cat, price: px, mode: "all" });
         }
-        if (!LEGACY_PUSH) {
-          const hit = setupGate(s, arr, st, nowMs);
-          if (hit) {
-            const hourKey = Math.floor(nowMs / 36e5);
-            if (monState.hour !== hourKey) { monState.hour = hourKey; monState.hourN = 0; }
-            if (monState.hourN >= PUSH_HOURLY_CAP) {
-              monState.digest = (monState.digest || []).concat([{ sym: s, tier: hit.tier, price: hit.price }]);
-              console.log("DIGEST:", hit.title);
-            } else {
-              monState.hourN++;
-              console.log("PUSH:", hit.title, "—", hit.body);
-              await sendAlert(s, hit.title, hit.body, `${s}-setup-${hit.tier}-${Math.floor(nowMs / 6e4)}`);
-            }
-            journalAdd({ t: nowMs, sym: s, tier: hit.tier, kind: "setup", sig: Object.keys(hit.sig).filter((k) => hit.sig[k]), price: hit.price, digest: monState.hourN >= PUSH_HOURLY_CAP });
+        /* RECOMMENDED package: confluence tiers, hourly cap, digest overflow */
+        const hit = setupGate(s, arr, st, nowMs);
+        if (hit) {
+          const hourKey = Math.floor(nowMs / 36e5);
+          if (monState.hour !== hourKey) { monState.hour = hourKey; monState.hourN = 0; }
+          if (monState.hourN >= PUSH_HOURLY_CAP) {
+            monState.digest = (monState.digest || []).concat([{ sym: s, tier: hit.tier, price: hit.price }]);
+            console.log("DIGEST:", hit.title);
+          } else {
+            monState.hourN++;
+            console.log("PUSH:", hit.title, "—", hit.body);
+            await sendAlert(s, hit.title, hit.body, `${s}-setup-${hit.tier}-${Math.floor(nowMs / 6e4)}`, "rec");
           }
+          journalAdd({ t: nowMs, sym: s, tier: hit.tier, kind: "setup", sig: Object.keys(hit.sig).filter((k) => hit.sig[k]), price: hit.price, digest: monState.hourN >= PUSH_HOURLY_CAP });
+        }
+        /* ALL package: tier 1 and up, no lunch rule, no hourly cap, own state */
+        const hitAll = setupGate(s, arr, st.all || (st.all = {}), nowMs, ALL_OPTS);
+        if (hitAll) {
+          console.log("PUSH(all):", hitAll.title, "—", hitAll.body);
+          await sendAlert(s, hitAll.title, hitAll.body, `${s}-setup-all-${hitAll.tier}-${Math.floor(nowMs / 6e4)}`, "all");
+          if (!hit) journalAdd({ t: nowMs, sym: s, tier: hitAll.tier, kind: "setup", sig: Object.keys(hitAll.sig).filter((k) => hitAll.sig[k]), price: hitAll.price, mode: "all" });
         }
         journalUpdate(s, arr);
         /* user-set price-cross levels on this symbol */
@@ -1149,6 +1219,7 @@ const server = http.createServer(async (req, res) => {
         if (!deviceOk(b.device)) throw new Error("device not authorized");
         devices[b.device].symbols = syms; /* this device's own watchlist */
         if (b.prefs && typeof b.prefs === "object") devices[b.device].prefs = b.prefs;
+        if (b.mode) devices[b.device].mode = b.mode === "all" ? "all" : "rec";
         saveDevices();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, watching: syms.length }));
@@ -1156,6 +1227,7 @@ const server = http.createServer(async (req, res) => {
       }
       watch = syms;
       if (b.prefs && typeof b.prefs === "object") watchPrefs = b.prefs;
+      if (b.mode) watchMode = b.mode === "all" ? "all" : "rec";
       saveSubs();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, watching: watch.length }));
@@ -1197,6 +1269,40 @@ const server = http.createServer(async (req, res) => {
   if (u === "/journal" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ stats: journalStats(20), recent: journal.slice(-30).reverse(), policy: { legacy: LEGACY_PUSH, hourlyCap: PUSH_HOURLY_CAP, symDailyCap: PUSH_SYM_DAILY_CAP, minPrice: MIN_PUSH_PRICE } }));
+    return;
+  }
+  if (u === "/backtest" && req.method === "POST") {
+    /* replay today's tape for one symbol through the old rules, the
+       recommended package and the ALL package */
+    if (SERVER_KEYS && INVITE_CODE && !deviceOk(req.headers["x-device"])) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "device not authorized — enter the access code" }));
+      return;
+    }
+    try {
+      const b = JSON.parse(await readBody(req) || "{}");
+      const sym = String(b.symbol || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 8);
+      if (!sym) throw new Error("symbol required");
+      const H = SERVER_KEYS
+        ? { "APCA-API-KEY-ID": process.env.APCA_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.APCA_API_SECRET_KEY }
+        : { "APCA-API-KEY-ID": req.headers["apca-api-key-id"] || "", "APCA-API-SECRET-KEY": req.headers["apca-api-secret-key"] || "" };
+      const feed = SERVER_KEYS ? SERVER_FEED : (b.feed === "sip" ? "sip" : "iex");
+      const [j1, jd] = await Promise.all([
+        fetchJSON(`${DATA}/v2/stocks/bars?symbols=${sym}&timeframe=1Min&start=${encodeURIComponent(sessionStartISO())}&limit=10000&feed=${feed}`, H),
+        fetchJSON(`${DATA}/v2/stocks/bars?symbols=${sym}&timeframe=1Day&start=${encodeURIComponent(sessionStartISO(7))}&limit=10&adjustment=split&feed=${feed}`, H).catch(() => null),
+      ]);
+      const arr = ((j1.bars && j1.bars[sym]) || []).map((x) => ({ t: new Date(x.t).getTime(), o: x.o, h: x.h, l: x.l, c: x.c, v: x.v }));
+      if (!arr.length) throw new Error("no bars today for " + sym);
+      const today = etDay(Date.now());
+      const dailies = ((jd && jd.bars && jd.bars[sym]) || []).filter((x) => etDay(new Date(x.t).getTime()) !== today);
+      const prevClose = dailies.length ? dailies[dailies.length - 1].c : (b.prevClose || null);
+      const r = backtestSymbol(arr, prevClose, { floor: Number(b.floor) || 2000000 });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ symbol: sym, prevClose, ...r }));
+    } catch (e) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e && e.message || e).slice(0, 200) }));
+    }
     return;
   }
   if (u === "/plan" && req.method === "POST") {
@@ -1276,4 +1382,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => console.log(`\n  Momentum scanner running → http://localhost:${PORT}\n`));
 
-module.exports = { computeTriggers, encryptPayload, vapidJWT, apnsJWT, apnsPayload, sendPush, APNS, setupSignals, tierOf, setupGate, sanitizePlan, journalStats, pivots };
+module.exports = { computeTriggers, encryptPayload, vapidJWT, apnsJWT, apnsPayload, sendPush, sendAlert, devices, APNS, setupSignals, tierOf, setupGate, backtestSymbol, ALL_OPTS, sanitizePlan, journalStats, pivots };

@@ -90,6 +90,27 @@ const b64uDec = (s) => Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "bas
     const devs2 = JSON.parse(fs.readFileSync("/tmp/scanner-devices.json", "utf8"));
     ok(!devs2[dev], "forget wipes the device record (account, watchlist, push token)");
 
+    /* alert packages: two devices, one on RECOMMENDED, one on ALL — a
+       package-scoped alert reaches only its subscribers, a halt reaches both */
+    got.length = 0;
+    const dR = "device-rec-mode-0001", dA = "device-all-mode-0001";
+    for (const [id, mode, tok] of [[dR, "rec", "aa" + "1".repeat(62)], [dA, "all", "bb" + "2".repeat(62)]]) {
+      await J("/auth/claim", { code: "letmein", device: id });
+      await J("/push/register", { apns: tok, device: id });
+      const w = await J("/push/watchlist", { symbols: ["GCDT"], device: id, mode });
+      ok(w.ok, `device ${mode}: watchlist + package stored`);
+    }
+    const dv = JSON.parse(fs.readFileSync("/tmp/scanner-devices.json", "utf8"));
+    ok(dv[dR].mode === "rec" && dv[dA].mode === "all", "server keeps each device's package");
+    /* drive the in-process module's router with the same device file */
+    Object.assign(M.devices, dv);
+    await M.sendAlert("GCDT", "⚡ GCDT setup 3/5", "test", "GCDT-setup-2-1", "rec");
+    await M.sendAlert("GCDT", "🚨 GCDT reclaimed VWAP", "test", "GCDT-vwapx", "all");
+    await M.sendAlert("GCDT", "⛔ GCDT possible halt", "test", "GCDT-halt-1");
+    const toks = got.map((g) => g.h[":path"].split("/").pop().slice(0, 2) + ":" + g.body.aps.alert.title.slice(0, 2));
+    ok(toks.filter((x) => x.startsWith("aa")).length === 2 && toks.filter((x) => x.startsWith("bb")).length === 2, "RECOMMENDED device got setup + halt; ALL device got VWAP event + halt: " + toks.join(" "));
+    ok(!toks.includes("aa:🚨") && !toks.includes("bb:⚡"), "no package leaks across devices");
+
     for (const u of ["/privacy", "/terms", "/support"]) {
       const t = await fetch(B + u); const html = await t.text();
       ok(t.ok && t.headers.get("content-type").includes("text/html") && html.includes("<h1>") && html.includes("MOMENTUM SCANNER"), u + " serves an HTML page");

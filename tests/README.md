@@ -1,7 +1,9 @@
 # Tests (representative subset)
 
 - test-setup.js  — server unit: the CONFLUENCE PUSH GATE (signals, tiers,
-                   lunch rule, silent baseline, escalation-only re-push,
+                   lunch rule, ARRIVAL push vs silent baseline, the ALL
+                   package options, a GCDT-shaped tape replayed through
+                   old / recommended / all, escalation-only re-push,
                    new-leg after a pullback, daily cap, price floor, stale
                    tape), the plan sanitiser, journal stats and pivots.
                    Run from tests/: `cp ../deploy/server.js . && node test-setup.js`

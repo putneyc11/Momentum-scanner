@@ -99,7 +99,7 @@ const stub = http.createServer((req, res) => {
   r = await post({}); ok(r.status === 400, "missing symbol is a 400");
 
   const jr = await (await fetch(B + "/journal")).json();
-  ok(jr && jr.stats && jr.policy && jr.policy.legacy === false && jr.policy.hourlyCap === 6, "/journal exposes stats and the push policy");
+  ok(jr && jr.stats && jr.policy && jr.policy.legacy === false && jr.policy.hourlyCap === 10 && jr.policy.symDailyCap === 4, "/journal exposes stats and the push policy (10/hour, 4 per symbol)");
   s1.kill();
 
   /* no key → plans off */

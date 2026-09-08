@@ -115,8 +115,8 @@ PR bodies, or code comments.
 | `SUPPORT_EMAIL` | no | Address printed on `/privacy`, `/terms`, `/support`. |
 | `SERVER_FEED` | no | `sip` (default) or `iex`. Sets the feed clients get in server-keys mode. |
 | `LEGACY_PUSH` | no | `1` restores the old behavior where every single trigger pushes. Default `0` (confluence-gated). |
-| `PUSH_HOURLY_CAP` | no | Default 6. Overflow rolls into a digest. |
-| `PUSH_SYM_DAILY_CAP` | no | Default 3 pushes per symbol per day. |
+| `PUSH_HOURLY_CAP` | no | Default 10 (RECOMMENDED package only). Overflow rolls into a digest. |
+| `PUSH_SYM_DAILY_CAP` | no | Default 4 pushes per symbol per day (RECOMMENDED). `ALL_SYM_DAILY_CAP` (12) and `ALL_MIN_PRICE` (0.25) govern the ALL package. |
 | `MIN_PUSH_PRICE` | no | Default 0.50. |
 | `MAX_DEVICES` | no | Device registration cap. |
 | `ALPACA_DATA_URL` / `ALPACA_TRADING_URL` | tests only | Point the proxy at a stub upstream. |
@@ -192,8 +192,8 @@ Then, with `PW_EXECUTABLE` pointing at the sandbox Chromium:
 
 | Suite | Clock pinned to | Expect |
 |---|---|---|
-| `tests/test26.js` | 13:00 ET | 37 checks, Advanced view |
-| `tests/test28.js` | 17:30 ET | 19 checks, alerts + After Hours |
+| `tests/test26.js` | 13:00 ET | 40 checks, Advanced view |
+| `tests/test28.js` | 17:30 ET | 21 checks, alerts + After Hours |
 | `tests/test-native.js` | 13:00 ET | 18 checks, App Store (Capacitor) mode with a fake bridge |
 | `tests/test-pm.js` | 07:30 ET | 8 checks, premarket discovery |
 | `tests/test-onboard.js` | 13:00 ET | 19 checks, onboarding + accounts |
@@ -236,7 +236,7 @@ Gotchas that will waste your time:
   day, three green candles) line up on the same bar, 4 of 5 during the
   11:30–14:00 chop window. Tier 2 is "setup," tier 3 is "breakout." A symbol
   pushes again only on escalation or a new leg after an 8% pullback. Caps:
-  3 per symbol per day, 6 per hour globally, overflow becomes one digest.
+  4 per symbol per day, 10 per hour globally, overflow becomes one digest.
   Halts bypass the gate. `LEGACY_PUSH=1` restores old behavior.
 - **Push journal.** Every push is recorded with price at 5, 15 and 30 minutes
   after, plus the best and worst print in that window. `/journal` serves the
@@ -258,6 +258,33 @@ Gotchas that will waste your time:
   (Apple / Google / email) → Free vs Pro picker → connect. Sign-in and billing
   are **simulated on-device**; no identity provider or payment processor is
   wired. Real auth arrives with the native shell.
+- **Alert packages (2026-09-08).** Two lock-screen packages, chosen per
+  device (Settings and the alert center; `mode` on `/push/watchlist`).
+  RECOMMENDED = confluence tiers 2/3 + halts + price levels, capped and
+  digested. ALL = everything RECOMMENDED sends, plus every single-event
+  trigger (VWAP reclaim, EMA cross, PMH break, 3 green, volume spike) and
+  tier-1 setups, no lunch rule, no hourly cap, 12/symbol/day, $0.25 floor.
+  `sendAlert(sym, title, body, key, mode)` routes by package; halts and
+  levels go to everyone. The ALL package keeps its own gate state under
+  `monState.sym[s].all`.
+- **Arrival push.** `setupGate` no longer baselines silently when a symbol
+  first appears already in a live setup (tier reached, new high inside the
+  last three bars, current bar). That silent baseline is exactly why GCDT
+  (.55→.86) pushed nothing: it entered the list mid-run. A symbol that
+  arrives flat still baselines. `arrival:false` restores the old rule (the
+  replay's "old rules" column uses it).
+- **Volume floor 2M.** Client default `minDayVol` 5M → 2M; a saved setup
+  still on 5M is migrated (settings `ver` 4).
+- **Tape replay.** `POST /backtest {symbol}` replays today's 1-min bars
+  through old / recommended / all (`backtestSymbol`, pure, unit-tested with a
+  GCDT-shaped tape) and reports when each would have listed the symbol and
+  every push it would have sent. UI: the per-ticker alerts sheet, "Replay
+  today through the rules".
+- **Advanced view tape coalescing.** WebSocket prints queue in a ref and land
+  in React 4×/s instead of one render + indicator recompute per print. That
+  render storm is what made Analyze need many taps on a fast runner. The
+  button also flips its label on pointer-down in the DOM (before React) and
+  all plan-card buttons are 44px targets.
 - **Watchlist row layout.** News icon and DIL tag sit at the end of the row
   after the bell; rows scroll horizontally for overflow.
 - **App Store shell (Phase 2, repo side complete).** `native/` holds the
