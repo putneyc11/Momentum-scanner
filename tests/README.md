@@ -1,4 +1,45 @@
-# Tests (representative subset)
+# Tests
+
+Build first, then run the server and alert recovery suites with Node 22:
+
+```sh
+python3 build/build.py
+node tests/run-server-tests.js
+```
+
+The runner executes `test-setup`, `test-apns`, `test-plan`, `test-serverkeys`,
+`test-dup`, `test-trig4`, `test-alert-delivery`, and `test-push-recovery` sequentially.
+It uses the invoking Node executable for child servers, rejects a stale generated
+server, and stops a suite after 90 seconds. Each suite gets a unique temporary
+working directory and state directory. The runner changes old `/tmp/scanner-*`
+paths only in temporary test copies, supplies an allowlisted environment without
+live Alpaca/APNs/Anthropic credentials, and removes test servers and temporary
+files on success, failure, or interruption. It requires macOS or Linux process
+groups for descendant cleanup. Copied servers and stubs bind only to loopback;
+tests that use HTTP require local loopback access.
+
+Run a subset by name, or list the available suites:
+
+```sh
+node tests/run-server-tests.js test-apns test-serverkeys
+node tests/run-server-tests.js --list
+```
+
+The two alert regression suites can also run directly without network access:
+
+```sh
+node tests/test-alert-delivery.js
+node tests/test-push-recovery.js
+```
+
+- `test-alert-delivery.js`: persisted signing identity/subscriptions, paginated
+  monitor data, failure visibility/recovery, overlapping ticks, bounded push
+  requests, and failed storage writes.
+- `test-push-recovery.js`: server acknowledgement, stale VAPID replacement,
+  startup recovery, successful empty discovery, pending watch edits, permission
+  handling, disabling races, native push, and connected credentials versus drafts.
+
+## Existing suite coverage
 
 - test-setup.js  — server unit: the CONFLUENCE PUSH GATE (signals, tiers,
                    lunch rule, ARRIVAL push vs silent baseline, the ALL
@@ -6,18 +47,17 @@
                    old / recommended / all, escalation-only re-push,
                    new-leg after a pullback, daily cap, price floor, stale
                    tape), the plan sanitiser, journal stats and pivots.
-                   Run from tests/: `cp ../deploy/server.js . && node test-setup.js`
+                   Run: `node tests/run-server-tests.js test-setup`
 - test-plan.js   — server unit: POST /plan against a stub Alpaca AND a stub
                    Anthropic endpoint (level pack contents, JSON-schema
                    structured output, fallbacks header, prompt caching,
                    range-checked levels, 5-min cache + refresh rate limit, the
                    202-pending / poll path for slow model calls,
                    refusal / malformed / no-tape errors, /journal, and the
-                   no-key 503). Run from tests/: `cp ../deploy/server.js . && node test-plan.js`
+                   no-key 503). Run: `node tests/run-server-tests.js test-plan`
 - test-serverkeys.js — server unit: SERVER-KEYS mode (env-held credentials,
                    invite gate, per-device watchlists, proxy injection,
-                   legacy passthrough). Run with server.js in the same
-                   directory: `cp ../deploy/server.js . && node test-serverkeys.js`
+                   legacy passthrough). Run: `node tests/run-server-tests.js test-serverkeys`
 - test-onboard.js — Playwright UI: first-run walkthrough → account sign-up
                    (Apple / Google / email, simulated on-device) → Free vs
                    Pro plan picker → connect screen; About page, relocated
@@ -28,7 +68,7 @@
                    kid/iss/iat, 50-min cache), aps payload, HTTP/2 headers on
                    the wire against a local stub, dead-token folding,
                    /push/register { apns }, /auth/forget, legal pages.
-                   Run from tests/: `cp ../deploy/server.js . && node test-apns.js`
+                   Run: `node tests/run-server-tests.js test-apns`
 - test-native.js — Playwright UI: App Store (Capacitor) mode via a fake
                    window.Capacitor bridge — simulated providers and pretend
                    billing hidden, APNs token registered through the bell,
@@ -36,8 +76,7 @@
                    account → /auth/forget, About legal links. Server on :8787.
 - test-dup.js    — server unit: every duplicate-notification scenario (subscription
                    replacement, unified volume alert, bar consumption, cooldowns,
-                   baseline swallowing). Run with server.js in the same directory:
-                   `cp ../deploy/server.js . && PORT=8793 node test-dup.js`
+                   baseline swallowing). Run: `node tests/run-server-tests.js test-dup`
 - test-trig4.js  — server unit: 10-candle opening drive + mom3 streak rules.
 - test-pm.js     — Playwright UI: PREMARKET discovery. Clock pinned to 07:30 ET,
                    Alpaca mocked realistically (NO daily bar for today before the
