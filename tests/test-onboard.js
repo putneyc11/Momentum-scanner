@@ -109,6 +109,9 @@ function bars1(n) { const a = []; for (let i = 0; i < n; i++) { const c = 1 + i 
   console.log(c0.includes('Live market data included') && c0.includes('Access code') ? '✓ server-keys mode: connect screen offers an access code, data included' : '✗ server-mode connect screen wrong');
   console.log(!c0.includes('API key ID') ? '✓ …and never asks for API keys' : '✗ key fields still shown in server mode');
   await page.fill('input[autocapitalize="none"]', 'letmein');
+  const volField = await page.evaluate(() => { const inp = [...document.querySelectorAll('input[type="number"]')].map((i) => i.value); return inp; });
+  console.log(volField.includes('2000000') && !volField.includes('5000000') ? '✓ a saved setup still on the old 5M floor is migrated to 2M' : '✗ floor not migrated: ' + JSON.stringify(volField));
+  console.log(!!(await page.$('button[aria-label="alert package: Recommended"]')) && !!(await page.$('button[aria-label="alert package: All alerts"]')) ? '✓ Settings carries the alert package switch' : '✗ package switch missing from Settings');
   await page.click('button:has-text("Start scanning")');
   await page.waitForSelector('span:has-text("GOODA")', { timeout: 15000 });
   console.log(claimed && claimed.code === 'letmein' && /^dv/.test(claimed.device || '') ? '✓ Start claims the device with the code + a stable device id' : '✗ claim payload wrong: ' + JSON.stringify(claimed));

@@ -72,7 +72,8 @@ function barsAH(sym, n){
   await page.route('**/float/**', (r) => r.fulfill({ json: { float: null } }));
   await page.route('**/push/**', (r) => r.fulfill({ json: { ok: true, key: 'x' } }));
   await page.route('**/push/status', (r) => r.fulfill({ json: { devices: 1, lastError: null } }));
-  await page.route('**/push/watchlist', (r) => { syncedSyms = JSON.parse(r.request().postData() || '{}').symbols || []; r.fulfill({ json: { ok: true } }); });
+  let syncedMode = null;
+  await page.route('**/push/watchlist', (r) => { const b = JSON.parse(r.request().postData() || '{}'); syncedSyms = b.symbols || []; syncedMode = b.mode || null; r.fulfill({ json: { ok: true } }); });
   await page.route('**/journal', (r) => r.fulfill({ json: { stats: { n: 23, green15: 61.5, avg15: 1.42, avgMaxUp30: 3.24,
     tier2: { n: 15, green15: 56.2 }, tier3: { n: 8, green15: 71.4 } }, recent: [], policy: {} } }));
   await page.route('**/settings', (r) => r.fulfill({ json: {} }));
@@ -103,6 +104,15 @@ function barsAH(sym, n){
   console.log(hitChip && hitChip.h === hitChip.bellH ? `✓ chip matches the control-row height (${hitChip.h}px)` : '✗ chip height off: ' + JSON.stringify(hitChip));
   await page.click('button:has-text("HIT")');
   await page.waitForTimeout(500);
+  const modeBefore = await page.evaluate(() => { const b = document.querySelector('button[aria-label="alert package: Recommended"]'); return b ? b.getAttribute('aria-pressed') : null; });
+  console.log(modeBefore === 'true' ? '✓ alert center shows the package switch, Recommended by default' : '✗ package switch missing: ' + modeBefore);
+  syncedMode = null;
+  await page.click('button[aria-label="alert package: All alerts"]');
+  await page.waitForTimeout(400);
+  const modeAfter = await page.evaluate(() => ({ pressed: document.querySelector('button[aria-label="alert package: All alerts"]').getAttribute('aria-pressed'), stored: localStorage.getItem('alert-mode'), txt: document.querySelector('#root').textContent.includes('No lunch rule, no hourly cap') }));
+  console.log(modeAfter.pressed === 'true' && modeAfter.stored === 'all' && modeAfter.txt && syncedMode === 'all' ? '✓ switching to ALL persists, explains itself, and re-syncs the monitor with mode: all' : '✗ package switch broken: ' + JSON.stringify({ ...modeAfter, syncedMode }));
+  await page.click('button[aria-label="alert package: Recommended"]');
+  await page.waitForTimeout(300);
   const jPanel = await page.evaluate(() => {
     const t = document.querySelector('#root').textContent;
     const vals = [...document.querySelectorAll('div')].filter(d => /^(62%|\+1\.4%|\+3\.2%)$/.test(d.textContent.trim())).length;

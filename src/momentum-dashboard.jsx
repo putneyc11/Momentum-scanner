@@ -598,6 +598,28 @@ function NewsIcon({ size }) {
 
 /* ---------------- watchlist row ---------------- */
 /* per-ticker alert categories a user can switch off individually */
+/* lock-screen alert packages: the curated confluence package, or the raw
+   tape for people who read it themselves */
+const ALERT_MODES = [
+  ["rec", "Recommended", "Confluence setups, halts and your price levels. Capped and digested so the lock screen stays quiet."],
+  ["all", "All alerts", "Every signal as it fires: VWAP reclaim, EMA cross, PMH break, 3 green, volume spikes, early 2-of-5 setups. No lunch rule, no hourly cap."],
+];
+function AlertModeSwitch({ mode, onChange }) {
+  return (
+    <div>
+      <div style={{ display: "flex", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: 3, gap: 3 }}>
+        {ALERT_MODES.map(([k, label]) => (
+          <button key={k} onClick={() => onChange(k)} aria-pressed={mode === k} aria-label={`alert package: ${label}`}
+            style={{ flex: 1, height: 44, border: "none", borderRadius: 6, cursor: "pointer", fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: 0.5, touchAction: "manipulation",
+              background: mode === k ? C.amber : "transparent", color: mode === k ? "#06090D" : C.muted }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, marginTop: 6 }}>{(ALERT_MODES.find(([k]) => k === mode) || ALERT_MODES[0])[2]}</div>
+    </div>
+  );
+}
 const ALERT_CATS = [
   ["setup", "Setup pushes"], ["vwap", "VWAP reclaim"], ["ema", "EMA cross"], ["pmh", "PMH break"],
   ["mom3", "3 green"], ["vol", "Volume surge"], ["halt", "Halts"], ["rot", "Rotation"],
@@ -1236,6 +1258,20 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   useEffect(() => { setPlan(null); setPlanT(0); setPlanPx(null); setPlanErr(""); }, [symbol]);
   useEffect(() => { if (!plan) return; const id = setInterval(() => setPlanTick((x) => x + 1), 30000); return () => clearInterval(id); }, [plan]);
   const [lvIn, setLvIn] = useState(""); // price-level alert input
+  const [bt, setBt] = useState(null); // tape regression: { busy, data, err }
+  const runBacktest = async () => {
+    setBt({ busy: true });
+    try {
+      const r = await fetch("/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "APCA-API-KEY-ID": (keys.id || "").trim(), "APCA-API-SECRET-KEY": (keys.secret || "").trim(), ...(DEVICE.id ? { "X-Device": DEVICE.id } : {}) },
+        body: JSON.stringify({ symbol, feed: feedMode(feed).delayMs ? "iex" : feed, prevClose: g && (g.prevClose || (g.pct != null && g.price ? g.price / (1 + g.pct / 100) : null)) }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `${r.status}`);
+      setBt({ data: j });
+    } catch (e) { setBt({ err: String(e.message || e) }); }
+  };
 
   const tfObj = TFS.find((t) => t.key === tf);
   const daily = tf === "1Day";
@@ -1322,6 +1358,33 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
         if (onAlert) onAlert(`⛔ ${symbol} tape stalled`, "No prints for 20s+ on a live tape — possible LULD halt");
       }
     }, 5000);
+    /* COALESCED tape: a runner prints tens of times a second, and each print
+       used to re-render this whole view and recompute the indicators — the
+       main thread stalled and taps went nowhere. Prints now queue in a ref
+       and land in React four times a second. */
+    const pend = { ticks: [], big: [], trades: [], quote: null };
+    const applyBars = (prev, p, s, t) => {
+      if (prev.length === 0 || daily) return prev;
+      const ms = tfObj.ms;
+      const bucket = Math.floor(t / ms) * ms;
+      const last = prev[prev.length - 1];
+      if (bucket <= last.t) {
+        const nb = { ...last, c: p, h: Math.max(last.h, p), l: Math.min(last.l, p), v: last.v + s };
+        return [...prev.slice(0, -1), nb];
+      }
+      return [...prev, { t: bucket, o: p, h: p, l: p, c: p, v: s }];
+    };
+    const flush = () => {
+      if (!pend.ticks.length && !pend.quote) return;
+      const ticks = pend.ticks, big = pend.big, trades = pend.trades, q = pend.quote;
+      pend.ticks = []; pend.big = []; pend.trades = []; pend.quote = null;
+      if (ticks.length) setTicks((prev) => [...ticks.slice().reverse(), ...prev].slice(0, 40));
+      if (big.length) setBigTicks((prev) => [...big.slice().reverse(), ...prev].slice(0, 80));
+      if (trades.length && !feedMode(feed).delayMs) setBars((prev) => { let b = prev; for (const tr of trades) b = applyBars(b, tr.p, tr.s, tr.t); return b; });
+      if (q) setQuote(q);
+    };
+    const flushId = setInterval(flush, 250);
+    const pushQuote = (q) => { pend.quote = q; };
     const applyTrade = (p, s, t) => {
       tapeOkRef.current = Date.now();
       lastTradeMsRef.current = Date.now();
@@ -1331,21 +1394,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
         chartHaltRef.current = false; setChartHalt(false);
         if (onAlert) onAlert(`▶ ${symbol} prints resumed`, "Tape is moving again after the stall");
       }
-      setTicks((prev) => [{ p, s, t }, ...prev].slice(0, 40));
+      pend.ticks.push({ p, s, t });
+      pend.trades.push({ p, s, t });
       printsRef.current = [{ p, s, t }, ...printsRef.current].slice(0, 800);
-      if (s >= BIG_PRINT) setBigTicks((prev) => [{ p, s, t }, ...prev].slice(0, 80));
-      if (feedMode(feed).delayMs) return;
-      setBars((prev) => {
-        if (prev.length === 0 || daily) return prev;
-        const ms = tfObj.ms;
-        const bucket = Math.floor(t / ms) * ms;
-        const last = prev[prev.length - 1];
-        if (bucket <= last.t) {
-          const nb = { ...last, c: p, h: Math.max(last.h, p), l: Math.min(last.l, p), v: last.v + s };
-          return [...prev.slice(0, -1), nb];
-        }
-        return [...prev, { t: bucket, o: p, h: p, l: p, c: p, v: s }];
-      });
+      if (s >= BIG_PRINT) pend.big.push({ p, s, t });
     };
     const startPolling = () => {
       poll = setInterval(async () => {
@@ -1353,7 +1405,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
           const j = await alpaca(`/v2/stocks/${symbol}/trades/latest`, { feed: feedMode(feed).stream }, keys);
           if (j.trade) applyTrade(j.trade.p, j.trade.s, new Date(j.trade.t).getTime());
           const qj = await alpaca(`/v2/stocks/${symbol}/quotes/latest`, { feed: feedMode(feed).stream }, keys);
-          if (qj.quote) setQuote({ bp: qj.quote.bp, bs: qj.quote.bs, ap: qj.quote.ap, as: qj.quote.as, t: new Date(qj.quote.t).getTime() });
+          if (qj.quote) pushQuote({ bp: qj.quote.bp, bs: qj.quote.bs, ap: qj.quote.ap, as: qj.quote.as, t: new Date(qj.quote.t).getTime() });
           tapeOkRef.current = Date.now();
           setTapeErr(null);
         } catch (e) { setTapeErr(feedFailure(e)); }
@@ -1372,7 +1424,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
           }
           if (m.T === "error") { try { ws.close(); } catch {} }
           if (m.T === "t" && m.S === symbol) applyTrade(m.p, m.s, new Date(m.t).getTime());
-          if (m.T === "q" && m.S === symbol) setQuote({ bp: m.bp, bs: m.bs, ap: m.ap, as: m.as, t: new Date(m.t).getTime() });
+          if (m.T === "q" && m.S === symbol) pushQuote({ bp: m.bp, bs: m.bs, ap: m.ap, as: m.as, t: new Date(m.t).getTime() });
         }
       };
       ws.onerror = () => { setLive(false); if (!poll && !dead) startPolling(); };
@@ -1381,6 +1433,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
     return () => {
       dead = true;
       clearInterval(haltId);
+      clearInterval(flushId);
       if (poll) clearInterval(poll);
       try { wsRef.current && wsRef.current.close(); } catch {}
     };
@@ -1635,8 +1688,10 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
   };
   useEffect(() => () => { if (toastRef.current) clearTimeout(toastRef.current); }, []);
   const [planWait, setPlanWait] = useState(0); // seconds the current analysis has been running
+  const planBusyRef = useRef(false); /* the tap is honoured even if the render behind it is late */
   const analyze = async (fresh) => {
-    if (planBusy) return;
+    if (planBusyRef.current) return;
+    planBusyRef.current = true;
     setPlanBusy(true); setPlanErr(""); setPlanWait(0);
     const t0 = Date.now();
     const tick = setInterval(() => setPlanWait(Math.round((Date.now() - t0) / 1000)), 1000);
@@ -1668,6 +1723,7 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
       if (j.cached && fresh) say("Plan is under a minute old — showing it", true);
     } catch (e) { setPlanErr(String(e.message || e)); }
     clearInterval(tick);
+    planBusyRef.current = false;
     setPlanBusy(false);
   };
   const planText = () => {
@@ -1932,7 +1988,8 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
             const drift = plan && planPx && price ? ((price - planPx) / planPx) * 100 : 0;
             const biasCol = !plan ? C.dim : plan.bias === "bullish" ? C.up : plan.bias === "bearish" ? C.down : C.amber;
             const L = (v) => (v == null ? "—" : "$" + fp(v));
-            const sBtn = { background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, height: 28, padding: "0 9px", fontFamily: MONO, fontSize: 10, cursor: "pointer", whiteSpace: "nowrap", touchAction: "manipulation" };
+            /* 44px tap targets (Apple HIG); the icon inside stays small */
+            const sBtn = { background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, height: 44, minWidth: 44, padding: "0 12px", fontFamily: MONO, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap", touchAction: "manipulation", display: "inline-flex", alignItems: "center", justifyContent: "center" };
             return (
               <div style={{ margin: 8, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderBottom: `1px solid ${C.border}` }}>
@@ -1942,7 +1999,16 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
                   {plan && <button onClick={() => setPlanLines((v) => !v)} aria-label="toggle plan levels on chart" style={{ ...sBtn, color: planLines ? C.amber : C.muted, borderColor: planLines ? C.amber + "66" : C.border }}>levels {planLines ? "on" : "off"}</button>}
                   {plan && <button onClick={copyPlan} aria-label="copy plan" style={sBtn}><CopyIcon /></button>}
                   <button onClick={() => analyze(!!plan)} disabled={planBusy} aria-label={plan ? "refresh plan" : "analyze"}
-                    style={{ ...sBtn, background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, fontWeight: 700, opacity: planBusy ? 0.6 : 1 }}>
+                    /* the label flips in the DOM on touch-down, before React gets a
+                       turn — on a busy tape the render can lag, the feedback must not */
+                    onPointerDown={(e) => {
+                      const el = e.currentTarget; if (el.disabled) return;
+                      const tn = el.firstChild; if (!tn || tn.nodeType !== 3) return;
+                      el.dataset.label = tn.nodeValue; tn.nodeValue = "Analyzing…"; el.style.opacity = "0.6";
+                    }}
+                    onPointerUp={(e) => { const el = e.currentTarget; setTimeout(() => { if (!planBusyRef.current && el.dataset.label && el.firstChild) { el.firstChild.nodeValue = el.dataset.label; el.style.opacity = "1"; } }, 350); }}
+                    onPointerCancel={(e) => { const el = e.currentTarget; if (el.dataset.label && el.firstChild) { el.firstChild.nodeValue = el.dataset.label; el.style.opacity = "1"; } }}
+                    style={{ ...sBtn, background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, fontWeight: 700, fontSize: 12, padding: "0 16px", opacity: planBusy ? 0.6 : 1 }}>
                     {planBusy ? "Analyzing…" : plan ? "↻ Refresh" : "✦ Analyze"}
                   </button>
                 </div>
@@ -2101,6 +2167,49 @@ function AdvancedChart({ symbol, keys, feed, g, pm, news, prefs, plans, onToggle
               })}
             </div>
             <div style={{ padding: "0 16px 6px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
+              Today's tape · what each package would have pushed
+            </div>
+            <div style={{ padding: "0 16px 14px" }}>
+              {!bt && (
+                <button onClick={runBacktest} aria-label="replay today's tape through the alert rules"
+                  style={{ height: 44, width: "100%", background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 8, fontFamily: MONO, fontSize: 11, fontWeight: 700, cursor: "pointer", touchAction: "manipulation" }}>
+                  ▶ Replay today through the rules
+                </button>
+              )}
+              {bt && bt.busy && <div style={{ fontFamily: MONO, fontSize: 11, color: C.amber }}>Replaying the session bar by bar…</div>}
+              {bt && bt.err && <div style={{ fontFamily: MONO, fontSize: 11, color: C.down }}>✕ {bt.err}</div>}
+              {bt && bt.data && (() => {
+                const d = bt.data;
+                const cols = [["old", "Old rules"], ["rec", "Recommended"], ["all", "All alerts"]];
+                return (
+                  <div>
+                    <div style={{ fontFamily: MONO, fontSize: 10, color: C.muted, marginBottom: 8 }}>
+                      {d.bars} bars · low ${fp(d.lo)} → high ${fp(d.hi)}{d.run != null ? ` (+${d.run.toFixed(0)}%)` : ""}{d.prevClose ? ` · prev close $${fp(d.prevClose)}` : ""}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                      {cols.map(([k, label]) => {
+                        const ps = d.pushes[k] || [];
+                        return (
+                          <div key={k} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 8px", minWidth: 0 }}>
+                            <div style={{ fontFamily: MONO, fontSize: 9, letterSpacing: 1, color: k === "old" ? C.dim : C.amber, textTransform: "uppercase" }}>{label}</div>
+                            <div style={{ fontFamily: MONO, fontSize: 16, fontWeight: 800, color: ps.length ? C.up : C.down, margin: "4px 0" }}>{ps.length} push{ps.length === 1 ? "" : "es"}</div>
+                            <div style={{ fontSize: 9, color: C.dim, marginBottom: 6 }}>{d.entered[k] ? `on the list ${ftime(d.entered[k])}` : "never made the list"}</div>
+                            {ps.slice(0, 8).map((p, i) => (
+                              <div key={i} style={{ fontFamily: MONO, fontSize: 9.5, color: C.text, lineHeight: 1.45, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={p.title}>
+                                {ftime(p.t)} · ${fp(p.price)} {p.tier === 3 ? "🚀" : p.tier === 2 ? "⚡" : p.tier === 1 ? "·" : "•"}{p.arrival ? " arrival" : p.newLeg ? " new leg" : p.kind && p.kind !== "setup" ? " " + p.kind : ""}
+                              </div>
+                            ))}
+                            {ps.length > 8 && <div style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>+{ps.length - 8} more</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button onClick={runBacktest} style={{ marginTop: 8, height: 44, background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 8, padding: "0 14px", fontFamily: MONO, fontSize: 10, cursor: "pointer", touchAction: "manipulation" }}>↻ Run again</button>
+                  </div>
+                );
+              })()}
+            </div>
+            <div style={{ padding: "0 16px 6px", fontSize: 8, letterSpacing: 1.2, color: C.dim, textTransform: "uppercase", fontFamily: MONO }}>
               Price-cross levels · alerts when price crosses · up to 15
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 16px 16px", alignItems: "center" }}>
@@ -2146,7 +2255,7 @@ export default function App() {
   const [remember, setRemember] = useState(true);
   const [feed, setFeed] = useState("sip_delayed");
   const [maxPrice, setMaxPrice] = useState(100);
-  const [minDayVol, setMinDayVol] = useState(5000000);
+  const [minDayVol, setMinDayVol] = useState(2000000);
   const [running, setRunning] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
@@ -2254,7 +2363,7 @@ export default function App() {
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || "access denied");
-      const sv = { id: "server", secret: "server", code: invite.trim(), feed: (srvCfg && srvCfg.feed) || "sip", maxPrice, minDayVol, ver: 3 };
+      const sv = { id: "server", secret: "server", code: invite.trim(), feed: (srvCfg && srvCfg.feed) || "sip", maxPrice, minDayVol, ver: 4 };
       setKeys({ id: "server", secret: "server", code: sv.code });
       setFeed(sv.feed);
       try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}
@@ -2378,14 +2487,22 @@ export default function App() {
       setMutedSyms(mv.syms);
     }
   };
+  const [alertMode, setAlertModeState] = useState("rec");
+  const alertModeRef = useRef("rec");
   const syncWatch = useCallback(() => {
     try {
       fetch("/push/watchlist", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined, prefs: alertPrefsRef.current }),
+        body: JSON.stringify({ symbols: watchPoolRef.current.filter((s) => !mutedRef.current.has(s)).slice(0, 40), device: DEVICE.id || undefined, prefs: alertPrefsRef.current, mode: alertModeRef.current }),
       }).catch(() => {});
     } catch (e) {}
   }, []);
+  const setAlertMode = useCallback((m) => {
+    alertModeRef.current = m === "all" ? "all" : "rec";
+    setAlertModeState(alertModeRef.current);
+    try { window.storage.set("alert-mode", alertModeRef.current); } catch (e) {}
+    syncWatch(); /* the monitor routes by package immediately */
+  }, [syncWatch]);
   const toggleMute = useCallback((sym) => {
     const next = new Set(mutedRef.current);
     if (next.has(sym)) next.delete(sym); else next.add(sym);
@@ -2410,7 +2527,7 @@ export default function App() {
           const sv = await sr.json();
           if (sv && sv.id && sv.secret) {
             v = sv;
-            try { await window.storage.set("alpaca-keys", JSON.stringify({ ...sv, ver: 3 })); } catch {}
+            try { await window.storage.set("alpaca-keys", JSON.stringify({ ...sv, ver: 4 })); } catch {}
           }
         } catch {}
       }
@@ -2418,13 +2535,19 @@ export default function App() {
         setKeys({ id: v.id || "", secret: v.secret || "" });
         if (v.maxPrice) setMaxPrice(v.maxPrice);
         if (FEED_MODES[v.feed]) setFeed(v.feed);
-        if (v.minDayVol) setMinDayVol(v.minDayVol);
+        /* the old 5M floor hid $0.50 runners (GCDT .55→.86 never made the
+           list) — a saved setup still on that default moves to 2M */
+        if (v.minDayVol) setMinDayVol((!v.ver || v.ver < 4) && Number(v.minDayVol) === 5000000 ? 2000000 : v.minDayVol);
         if (v.alertsOn) setAlertsOn(true);
         if (v.id && v.secret) setRunning(true);
       }
       try {
         const mr = await window.storage.get("muted-syms");
         if (mr && mr.value) restoreMuted(JSON.parse(mr.value));
+      } catch {}
+      try {
+        const am = await window.storage.get("alert-mode");
+        if (am && am.value === "all") { alertModeRef.current = "all"; setAlertModeState("all"); }
       } catch {}
       try {
         if ("serviceWorker" in navigator) {
@@ -3160,7 +3283,7 @@ export default function App() {
         symbols: "AAPL", timeframe: "1Day", start: daysAgoISO(6), limit: 10, adjustment: "split",
       }), keys);
       if (remember) {
-        try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 3 })); } catch {}
+        try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 4 })); } catch {}
         try {
           fetch("/settings", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -3238,6 +3361,10 @@ export default function App() {
                     <input value={invite} onChange={(e) => setInvite(e.target.value)} autoCapitalize="none" style={inputStyle} />
                   </label>
                 )}
+                <div>
+                  <div style={{ ...labStyle, marginBottom: 6 }}>Alert package</div>
+                  <AlertModeSwitch mode={alertMode} onChange={setAlertMode} />
+                </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <label style={labStyle}>Max price ($)
                     <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={inputStyle} />
@@ -3259,6 +3386,10 @@ export default function App() {
                 <label style={labStyle}>API secret
                   <input type="password" value={keys.secret} onChange={(e) => setKeys((k) => ({ ...k, secret: e.target.value }))} style={inputStyle} />
                 </label>
+                <div>
+                  <div style={{ ...labStyle, marginBottom: 6 }}>Alert package</div>
+                  <AlertModeSwitch mode={alertMode} onChange={setAlertMode} />
+                </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                   <label style={labStyle}>Max price ($)
                     <input type="number" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} style={inputStyle} />
@@ -3399,6 +3530,10 @@ export default function App() {
               <div style={{ flex: 1 }} />
               <button onClick={() => setAlertLog([])} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.dim, borderRadius: 6, padding: "5px 10px", fontFamily: MONO, fontSize: 10, cursor: "pointer" }}>Clear all</button>
               <button onClick={() => setAlertCenter(false)} style={{ background: C.amber + "1A", border: `1px solid ${C.amber}66`, color: C.amber, borderRadius: 6, padding: "5px 12px", fontFamily: MONO, fontSize: 10, fontWeight: 700, cursor: "pointer" }}>Close</button>
+            </div>
+            <div style={{ padding: "12px 16px 14px", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ fontFamily: MONO, fontSize: 9, letterSpacing: 1.4, color: C.amber, textTransform: "uppercase", marginBottom: 8 }}>Alert package</div>
+              <AlertModeSwitch mode={alertMode} onChange={setAlertMode} />
             </div>
             <div style={{ padding: "12px 16px 14px", borderBottom: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: jStats && jStats.n > 0 ? 10 : 6 }}>

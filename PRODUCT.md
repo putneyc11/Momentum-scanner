@@ -132,7 +132,14 @@ requires per-user real-time display entitlements to function.
 - First observation of a symbol is a silent baseline. A symbol re-pushes only
   when it escalates to a higher tier or starts a fresh leg (≥ 8% pullback,
   then a 3% bounce with confluence, ≥ 20 min after the last push).
-- Caps: 3 pushes per symbol per day, 6 per hour feed-wide; overflow rolls
+- Two packages per device: **Recommended** (the policy below) and **All
+  alerts** (every single-event trigger plus 2-of-5 setups, no lunch rule, no
+  hourly cap, 12 per symbol per day) for traders who read the tape themselves.
+- A symbol that arrives on the list already breaking out (new high inside its
+  last three bars, tier reached) pushes on first sight; only a flat arrival
+  baselines silently.
+- Discovery floor: 2M shares day volume (was 5M).
+- Caps: 4 pushes per symbol per day, 10 per hour feed-wide; overflow rolls
   into one digest push per 15 minutes. Halts and user-set price levels still
   push directly. `LEGACY_PUSH=1` restores single-event pushes.
 - Every push is journaled with the price 5 / 15 / 30 minutes later and the

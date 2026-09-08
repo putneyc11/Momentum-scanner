@@ -40,8 +40,8 @@ REPS = [
         const raw = localStorage.getItem("alpaca-keys");
         if (raw) v = JSON.parse(raw);
       } catch {}'''),
-    ('try { await window.storage.set("alpaca-keys", JSON.stringify({ ...sv, ver: 3 })); } catch {}',
-     'try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...sv, ver: 3 })); } catch {}'),
+    ('try { await window.storage.set("alpaca-keys", JSON.stringify({ ...sv, ver: 4 })); } catch {}',
+     'try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...sv, ver: 4 })); } catch {}'),
     ('''        const r0 = await window.storage.get("alpaca-keys");
         const v0 = r0 && r0.value ? JSON.parse(r0.value) : {};
         await window.storage.set("alpaca-keys", JSON.stringify({ ...v0, alertsOn }));''',
@@ -56,8 +56,8 @@ REPS = [
             const v = JSON.parse(ucraw);'''),
     ('try { await window.storage.set("uni-cache", JSON.stringify({ t: Date.now(), symbols: universeRef.current })); } catch (e) {}',
      'try { localStorage.setItem("uni-cache", JSON.stringify({ t: Date.now(), symbols: universeRef.current })); } catch (e) {}'),
-    ('try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 3 })); } catch {}',
-     'try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 3 })); } catch {}'),
+    ('try { await window.storage.set("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 4 })); } catch {}',
+     'try { localStorage.setItem("alpaca-keys", JSON.stringify({ ...keys, maxPrice, feed, minDayVol, ver: 4 })); } catch {}'),
     ('try { window.storage.set("muted-syms", JSON.stringify({ day: etDay(Date.now()), syms: [...set] })); } catch (e) {}',
      'try { localStorage.setItem("muted-syms", JSON.stringify({ day: etDay(Date.now()), syms: [...set] })); } catch (e) {}'),
     ('''      try {
@@ -99,6 +99,15 @@ REPS = [
       } catch {}'''),
     ('try { window.storage.set("alert-prefs", JSON.stringify(alertPrefsRef.current)); } catch (e) {}',
      'try { localStorage.setItem("alert-prefs", JSON.stringify(alertPrefsRef.current)); } catch (e) {}'),
+    ('try { window.storage.set("alert-mode", alertModeRef.current); } catch (e) {}',
+     'try { localStorage.setItem("alert-mode", alertModeRef.current); } catch (e) {}'),
+    ('''      try {
+        const am = await window.storage.get("alert-mode");
+        if (am && am.value === "all") { alertModeRef.current = "all"; setAlertModeState("all"); }
+      } catch {}''',
+     '''      try {
+        if (localStorage.getItem("alert-mode") === "all") { alertModeRef.current = "all"; setAlertModeState("all"); }
+      } catch {}'''),
     ('try { window.storage.set("device-id", id); } catch (e) {}',
      'try { localStorage.setItem("device-id", id); } catch (e) {}'),
     ('try { window.storage.set("alpaca-keys", JSON.stringify(sv)); } catch (e) {}',

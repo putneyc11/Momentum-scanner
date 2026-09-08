@@ -1,6 +1,6 @@
 /* Confluence push gate — unit tests on the pure functions.
    Run from tests/: `cp ../deploy/server.js . && node test-setup.js` */
-const { setupSignals, tierOf, setupGate, sanitizePlan, journalStats, pivots } = require("./server.js");
+const { setupSignals, tierOf, setupGate, backtestSymbol, ALL_OPTS, sanitizePlan, journalStats, pivots } = require("./server.js");
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log("✓", m); } else { fail++; console.log("✗", m); } };
 /* bars at 10:00 ET today, 1-min, ending "now" */
@@ -39,15 +39,22 @@ ok(tierOf(3, { hod: true, vol: true }, 720) === 1 && tierOf(4, { hod: true, vol:
 
 /* --- gate: baseline, escalation, re-push rules --- */
 const st = {};
-arr = mk(20, { drift: 0.01, vol: 50000 }); // 4 signals, no vol → tier 2
+arr = mk(20, { drift: 0.01, vol: 50000 }); // 4 signals, no vol → tier 2, and a NEW HIGH in the last 3 bars
 let r = setupGate("AAA", arr, st, now(arr), { minPrice: 0.5, dailyCap: 3 });
-ok(r === null && st.setupInit === true && st.tier === 2, "first observation is a silent baseline — a stock already set up is not replayed");
+ok(r && r.arrival && r.tier === 2 && /just hit the list/.test(r.body) && st.pushes === 1, "ARRIVAL: a stock that shows up already breaking out (fresh new high, tier 2) pushes on first sight — the old silent baseline is what swallowed GCDT");
 r = setupGate("AAA", arr, st, now(arr) + 45000, { minPrice: 0.5, dailyCap: 3 });
 ok(r === null, "same tier again → no push (no news)");
+const stFlat = {};
+const flat = mk(20, { drift: 0.01, vol: 50000 }).map((b, i, a) => (i >= a.length - 6 ? { ...b, o: a[13].c, c: a[13].c, h: a[13].c + 0.002, l: a[13].c - 0.002 } : b)); // ran earlier, flat for 6 bars
+r = setupGate("FLT", flat, stFlat, now(flat), { minPrice: 0.5, dailyCap: 3 });
+ok(r === null && stFlat.setupInit === true, "arrival is only for a LIVE move: a stock whose high is six bars old baselines silently as before");
+const stOff = {};
+r = setupGate("AAA", arr, stOff, now(arr), { minPrice: 0.5, dailyCap: 3, arrival: false });
+ok(r === null && stOff.setupInit === true, "arrival can be switched off (the old-rules replay uses this)");
 arr = mk(21, { drift: 0.01, vol: (i) => (i === 20 ? 200000 : 50000) }); // adds vol + fresh HOD → tier 3
 r = setupGate("AAA", arr, st, now(arr), { minPrice: 0.5, dailyCap: 3 });
 ok(r && r.tier === 3 && /breakout/.test(r.title) && /HOD/.test(r.body) && /vol 4\.0×/.test(r.body), "escalation to tier 3 pushes once, naming the signals: " + (r && r.title + " — " + r.body));
-ok(st.pushes === 1 && st.tier === 3, "gate records the push and the tier");
+ok(st.pushes === 2 && st.tier === 3, "gate records the pushes (arrival + escalation) and the tier");
 r = setupGate("AAA", arr, st, now(arr) + 45000, { minPrice: 0.5, dailyCap: 3 });
 ok(r === null, "still tier 3 → no re-push");
 
@@ -63,7 +70,7 @@ ok(r && r.newLeg && /new leg/.test(r.body), "the bounce off the pullback re-arms
 /* daily cap */
 const st2 = { setupInit: true, setupDay: null };
 arr = mk(21, { drift: 0.01, vol: (i) => (i === 20 ? 200000 : 50000) });
-setupGate("BBB", arr, st2, now(arr), { minPrice: 0.5, dailyCap: 1 }); // baseline (day rollover resets init)
+setupGate("BBB", arr, st2, now(arr), { minPrice: 0.5, dailyCap: 1, arrival: false }); // silent baseline (day rollover resets init)
 st2.tier = 0; st2.setupInit = true;
 r = setupGate("BBB", arr, st2, now(arr) + 45000, { minPrice: 0.5, dailyCap: 1 });
 ok(r && st2.pushes === 1, "cap of 1: first push goes");
@@ -111,6 +118,41 @@ const b5 = [];
 for (let i = 0; i < 20; i++) b5.push({ t: i, o: 1, h: i === 10 ? 1.5 : 1.1, l: i === 5 ? 0.8 : 0.95, c: 1 });
 const pv = pivots(b5, 1.0);
 ok(pv.some((p) => p.price === 1.5 && p.side === "above") && pv.some((p) => p.price === 0.8 && p.side === "below"), "pivots find the swing high above and swing low below price");
+
+/* --- ALL package: tier 1 pushes, no lunch rule --- */
+const stAll = {};
+arr = mk(20, { drift: 0.002, base: 2, vol: 50000, start: [12, 0] }); // gentle drift at lunch
+arr[arr.length - 1] = { ...arr[arr.length - 1], c: arr[arr.length - 1].o - 0.001 }; // last bar red → no 3-green: VWAP + EMA + HOD = 3/5
+let sA = setupSignals(arr, now(arr));
+const tRec = tierOf(sA.n, sA.sig, 12 * 60 + 19), tAll = tierOf(sA.n, sA.sig, 12 * 60 + 19, false);
+ok(tRec < tAll || (tAll >= 1 && tRec <= 1), `lunch rule lifts under ALL: tier ${tRec} → ${tAll} on the same ${sA.n}/5 bar`);
+r = setupGate("LUN", arr, stAll, now(arr), ALL_OPTS);
+ok(r && r.tier >= 1 && /early|setup|breakout/.test(r.title), "ALL package pushes an early 2-of-5 setup at lunch that RECOMMENDED keeps quiet: " + (r && r.title));
+
+/* --- tape regression: a GCDT-shaped run (.55 → .86, ~3M shares) --- */
+function gcdt() {
+  const t0 = atET(9, 30); const a = []; let c = 0.55;
+  for (let i = 0; i < 120; i++) {
+    let drift = 0, vol = 12000;
+    if (i >= 40 && i < 70) { drift = 0.31 / 30; vol = 60000 + (i - 40) * 3000; }   /* the run: 10:10–10:40 */
+    else if (i >= 70) { drift = -0.0005; vol = 25000; }
+    if (i === 58) drift = -0.004;                 /* one red bar inside the run, then greens (a real tape breathes) */
+    if (i === 63) vol = 450000;                   /* and one volume burst */
+    const o = c; c = +(c + drift).toFixed(4);
+    a.push({ t: t0 + i * 60000, o, h: Math.max(o, c) + 0.003, l: Math.min(o, c) - 0.003, c, v: vol });
+  }
+  return a;
+}
+const tape = gcdt();
+const bt = backtestSymbol(tape, 0.42, { floor: 2000000 }); /* prev close .42 → +31% at .55 already */
+const cum = (i) => tape.slice(0, i + 1).reduce((x, b) => x + b.v, 0);
+ok(bt.bars === 120 && bt.hi >= 0.84 && bt.lo < 0.56 && bt.run > 50, `replay sees the run: low ${bt.lo.toFixed(2)} → high ${bt.hi.toFixed(2)} (+${bt.run.toFixed(0)}%)`);
+ok(bt.entered.rec && !bt.entered.old || (bt.entered.old && bt.entered.old > bt.entered.rec), "OLD rules (5M floor) never list it or list it late; the 2M floor puts it on the list " + (bt.entered.rec ? "at " + new Date(bt.entered.rec).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }) : ""));
+ok(bt.pushes.old.length === 0, "OLD rules: zero pushes on the whole run (what happened today)");
+const firstRec = bt.pushes.rec[0];
+ok(bt.pushes.rec.length >= 1 && firstRec && firstRec.arrival && firstRec.price < 0.75, `RECOMMENDED: pushes on arrival at $${firstRec && firstRec.price.toFixed(2)} while the run is still going (${bt.pushes.rec.length} push${bt.pushes.rec.length === 1 ? "" : "es"} total)`);
+ok(bt.pushes.all.length > bt.pushes.rec.length && bt.pushes.all.some((p) => p.kind !== "setup"), `ALL: ${bt.pushes.all.length} pushes including single-event triggers (${[...new Set(bt.pushes.all.map((p) => p.kind))].join(", ")})`);
+ok(bt.pushes.all[0].t <= firstRec.t, "ALL never fires later than RECOMMENDED on the same tape");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
