@@ -156,7 +156,23 @@ window.addEventListener('error',function(e){var b=document.getElementById('errbo
 </html>
 """
 
+def build_server():
+    """Regenerate the active root/deploy server artifacts without touching the client."""
+    tpl = open(TPL).read()
+    icon = open(ICON).read().strip()
+    os.makedirs(OUT, exist_ok=True)
+    generated = os.path.join(OUT, "server.js")
+    open(generated, "w").write(tpl.replace("__ICON_B64__", icon))
+    subprocess.check_call(["node", "--check", generated])
+    shutil.copyfile(generated, os.path.join(ROOT, "server.js"))
+
 def main():
+    if sys.argv[1:] == ["--server-only"]:
+        build_server()
+        print("built server artifacts only; client assets unchanged")
+        return
+    if sys.argv[1:]:
+        raise SystemExit("usage: python3 build/build.py [--server-only]")
     src = open(SRC).read()
     for a, b in REPS:
         assert a in src, "BUILD ANCHOR DRIFTED: " + a[:70]
@@ -174,10 +190,7 @@ def main():
     html = pre + sep + js + "\n</script>\n</body>\n</html>\n"
     open(os.path.join(OUT, "index.html"), "w").write(html)
 
-    tpl = open(TPL).read()
-    icon = open(ICON).read().strip()
-    open(os.path.join(OUT, "server.js"), "w").write(tpl.replace("__ICON_B64__", icon))
-    subprocess.check_call(["node", "--check", os.path.join(OUT, "server.js")])
+    build_server()
     # Render serves from the repo root (render.yaml: `node server.js`) — keep
     # the root copies in lockstep with deploy/ so a push always ships the build.
     shutil.copyfile(os.path.join(OUT, "index.html"), os.path.join(ROOT, "index.html"))
