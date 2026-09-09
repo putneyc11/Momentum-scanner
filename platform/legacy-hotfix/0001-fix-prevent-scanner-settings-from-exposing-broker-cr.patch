@@ -1,0 +1,460 @@
+From 009f6ca66c39e239119bc76bf8377ccf08b7f14b Mon Sep 17 00:00:00 2001
+From: cputney111 <corey.putney@edoinc.com>
+Date: Wed, 9 Sep 2026 12:14:54 -0500
+Subject: [PATCH] fix: prevent scanner settings from exposing broker
+ credentials
+
+---
+ build/build.py                  |  21 +++++--
+ deploy/server.js                |  56 +++++++++++++----
+ server.js                       |  56 +++++++++++++----
+ src/server.template.js          |  56 +++++++++++++----
+ tests/test-settings-security.js | 108 ++++++++++++++++++++++++++++++++
+ 5 files changed, 260 insertions(+), 37 deletions(-)
+ create mode 100644 tests/test-settings-security.js
+
+diff --git a/build/build.py b/build/build.py
+index e7063d2..6279a46 100644
+--- a/build/build.py
++++ b/build/build.py
+@@ -156,7 +156,23 @@ window.addEventListener('error',function(e){var b=document.getElementById('errbo
+ </html>
+ """
+ 
++def build_server():
++    """Regenerate the active root/deploy server artifacts without touching the client."""
++    tpl = open(TPL).read()
++    icon = open(ICON).read().strip()
++    os.makedirs(OUT, exist_ok=True)
++    generated = os.path.join(OUT, "server.js")
++    open(generated, "w").write(tpl.replace("__ICON_B64__", icon))
++    subprocess.check_call(["node", "--check", generated])
++    shutil.copyfile(generated, os.path.join(ROOT, "server.js"))
++
+ def main():
++    if sys.argv[1:] == ["--server-only"]:
++        build_server()
++        print("built server artifacts only; client assets unchanged")
++        return
++    if sys.argv[1:]:
++        raise SystemExit("usage: python3 build/build.py [--server-only]")
+     src = open(SRC).read()
+     for a, b in REPS:
+         assert a in src, "BUILD ANCHOR DRIFTED: " + a[:70]
+@@ -174,10 +190,7 @@ def main():
+     html = pre + sep + js + "\n</script>\n</body>\n</html>\n"
+     open(os.path.join(OUT, "index.html"), "w").write(html)
+ 
+-    tpl = open(TPL).read()
+-    icon = open(ICON).read().strip()
+-    open(os.path.join(OUT, "server.js"), "w").write(tpl.replace("__ICON_B64__", icon))
+-    subprocess.check_call(["node", "--check", os.path.join(OUT, "server.js")])
++    build_server()
+     # Render serves from the repo root (render.yaml: `node server.js`) — keep
+     # the root copies in lockstep with deploy/ so a push always ships the build.
+     shutil.copyfile(os.path.join(OUT, "index.html"), os.path.join(ROOT, "index.html"))
+diff --git a/deploy/server.js b/deploy/server.js
+index 5521ab0..df7ee24 100644
+--- a/deploy/server.js
++++ b/deploy/server.js
+@@ -253,6 +253,12 @@ try {
+   else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
+ } catch (e) {}
+ function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
++/* Server-owned credentials are environment-only. Old client keys are not
++   needed by the environment-backed monitor and must not linger in its file. */
++if (SERVER_KEYS && Array.isArray(subs) && subs.some((s) => s && s.keys)) {
++  subs = subs.map((s) => { const clean = { ...s }; delete clean.keys; return clean; });
++  saveSubs();
++}
+ 
+ /* per-ticker alert-category filtering: the alert key encodes its category */
+ const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
+@@ -944,9 +950,34 @@ async function generatePlan(sym, pack) {
+ 
+ /* ============================ settings persistence ============================ */
+ const SETTINGS_FILE = "/tmp/scanner-settings.json";
++/* Strict allowlist shared by load, save and GET. Never add credentials,
++   account records, device tokens, or arbitrary nested objects here. */
++function publicSettings(input) {
++  const clean = {};
++  if (!input || typeof input !== "object" || Array.isArray(input)) return clean;
++  if (Object.prototype.hasOwnProperty.call(input, "feed") && ["sip", "iex", "sip_delayed"].includes(input.feed)) clean.feed = input.feed;
++  if (Object.prototype.hasOwnProperty.call(input, "alertsOn") && typeof input.alertsOn === "boolean") clean.alertsOn = input.alertsOn;
++  for (const key of ["maxPrice", "minDayVol"]) {
++    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
++    const value = input[key];
++    if ((typeof value !== "number" && typeof value !== "string") || value === "" || typeof value === "string" && !value.trim()) continue;
++    const number = Number(value);
++    if (Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER && (key === "maxPrice" ? number > 0 : number >= 0)) clean[key] = number;
++  }
++  if (Object.prototype.hasOwnProperty.call(input, "ver") && Number.isInteger(input.ver) && input.ver >= 0 && input.ver <= 100) clean.ver = input.ver;
++  return clean;
++}
+ let settings = {};
+-try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
+-function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
++try {
++  const stored = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
++  settings = publicSettings(stored);
++  /* Migrate an existing insecure file without ever logging or returning it. */
++  if (JSON.stringify(stored) !== JSON.stringify(settings)) saveSettings();
++} catch (e) {}
++function saveSettings() {
++  settings = publicSettings(settings);
++  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings), { mode: 0o600 }); } catch (e) {}
++}
+ 
+ /* ============================ static assets ============================ */
+ const SW_JS = `self.addEventListener("push", (e) => {
+@@ -1149,21 +1180,24 @@ const server = http.createServer(async (req, res) => {
+     return;
+   }
+   if (u === "/settings" && req.method === "GET") {
+-    res.writeHead(200, { "Content-Type": "application/json" });
+-    res.end(JSON.stringify(settings));
++    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache" });
++    res.end(JSON.stringify(publicSettings(settings)));
+     return;
+   }
+   if (u === "/settings" && req.method === "POST") {
+     try {
+       const b = JSON.parse(await readBody(req));
+-      if (SERVER_KEYS) { delete b.id; delete b.secret; } /* never store client keys in server-keys mode */
+-      settings = { ...settings, ...b };
++      if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error("Invalid settings object");
++      /* Older clients still submit id/secret with preferences. Ignore ALL
++         unlisted fields in every mode; never restore server-stored keys. */
++      settings = { ...publicSettings(settings), ...publicSettings(b) };
+       saveSettings();
+-      res.writeHead(200, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ ok: true }));
++      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      res.end(JSON.stringify({ ok: true, credentialStorage: "environment-only" }));
+     } catch (e) {
+-      res.writeHead(400, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ error: String(e) }));
++      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      /* JSON parser messages can contain input fragments, including secrets. */
++      res.end(JSON.stringify({ error: "Invalid settings preferences" }));
+     }
+     return;
+   }
+@@ -1200,7 +1234,7 @@ const server = http.createServer(async (req, res) => {
+       }
+       /* single-user app: a new registration replaces ALL prior subscriptions.
+          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
+-      subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
++      subs = [{ sub: b.subscription, ...(SERVER_KEYS ? {} : { keys: b.keys || {} }), feed: SERVER_KEYS ? SERVER_FEED : b.feed || "sip" }];
+       saveSubs();
+       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
+       res.writeHead(200, { "Content-Type": "application/json" });
+diff --git a/server.js b/server.js
+index 5521ab0..df7ee24 100644
+--- a/server.js
++++ b/server.js
+@@ -253,6 +253,12 @@ try {
+   else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
+ } catch (e) {}
+ function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
++/* Server-owned credentials are environment-only. Old client keys are not
++   needed by the environment-backed monitor and must not linger in its file. */
++if (SERVER_KEYS && Array.isArray(subs) && subs.some((s) => s && s.keys)) {
++  subs = subs.map((s) => { const clean = { ...s }; delete clean.keys; return clean; });
++  saveSubs();
++}
+ 
+ /* per-ticker alert-category filtering: the alert key encodes its category */
+ const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
+@@ -944,9 +950,34 @@ async function generatePlan(sym, pack) {
+ 
+ /* ============================ settings persistence ============================ */
+ const SETTINGS_FILE = "/tmp/scanner-settings.json";
++/* Strict allowlist shared by load, save and GET. Never add credentials,
++   account records, device tokens, or arbitrary nested objects here. */
++function publicSettings(input) {
++  const clean = {};
++  if (!input || typeof input !== "object" || Array.isArray(input)) return clean;
++  if (Object.prototype.hasOwnProperty.call(input, "feed") && ["sip", "iex", "sip_delayed"].includes(input.feed)) clean.feed = input.feed;
++  if (Object.prototype.hasOwnProperty.call(input, "alertsOn") && typeof input.alertsOn === "boolean") clean.alertsOn = input.alertsOn;
++  for (const key of ["maxPrice", "minDayVol"]) {
++    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
++    const value = input[key];
++    if ((typeof value !== "number" && typeof value !== "string") || value === "" || typeof value === "string" && !value.trim()) continue;
++    const number = Number(value);
++    if (Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER && (key === "maxPrice" ? number > 0 : number >= 0)) clean[key] = number;
++  }
++  if (Object.prototype.hasOwnProperty.call(input, "ver") && Number.isInteger(input.ver) && input.ver >= 0 && input.ver <= 100) clean.ver = input.ver;
++  return clean;
++}
+ let settings = {};
+-try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
+-function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
++try {
++  const stored = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
++  settings = publicSettings(stored);
++  /* Migrate an existing insecure file without ever logging or returning it. */
++  if (JSON.stringify(stored) !== JSON.stringify(settings)) saveSettings();
++} catch (e) {}
++function saveSettings() {
++  settings = publicSettings(settings);
++  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings), { mode: 0o600 }); } catch (e) {}
++}
+ 
+ /* ============================ static assets ============================ */
+ const SW_JS = `self.addEventListener("push", (e) => {
+@@ -1149,21 +1180,24 @@ const server = http.createServer(async (req, res) => {
+     return;
+   }
+   if (u === "/settings" && req.method === "GET") {
+-    res.writeHead(200, { "Content-Type": "application/json" });
+-    res.end(JSON.stringify(settings));
++    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache" });
++    res.end(JSON.stringify(publicSettings(settings)));
+     return;
+   }
+   if (u === "/settings" && req.method === "POST") {
+     try {
+       const b = JSON.parse(await readBody(req));
+-      if (SERVER_KEYS) { delete b.id; delete b.secret; } /* never store client keys in server-keys mode */
+-      settings = { ...settings, ...b };
++      if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error("Invalid settings object");
++      /* Older clients still submit id/secret with preferences. Ignore ALL
++         unlisted fields in every mode; never restore server-stored keys. */
++      settings = { ...publicSettings(settings), ...publicSettings(b) };
+       saveSettings();
+-      res.writeHead(200, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ ok: true }));
++      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      res.end(JSON.stringify({ ok: true, credentialStorage: "environment-only" }));
+     } catch (e) {
+-      res.writeHead(400, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ error: String(e) }));
++      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      /* JSON parser messages can contain input fragments, including secrets. */
++      res.end(JSON.stringify({ error: "Invalid settings preferences" }));
+     }
+     return;
+   }
+@@ -1200,7 +1234,7 @@ const server = http.createServer(async (req, res) => {
+       }
+       /* single-user app: a new registration replaces ALL prior subscriptions.
+          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
+-      subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
++      subs = [{ sub: b.subscription, ...(SERVER_KEYS ? {} : { keys: b.keys || {} }), feed: SERVER_KEYS ? SERVER_FEED : b.feed || "sip" }];
+       saveSubs();
+       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
+       res.writeHead(200, { "Content-Type": "application/json" });
+diff --git a/src/server.template.js b/src/server.template.js
+index 144651c..fa36397 100644
+--- a/src/server.template.js
++++ b/src/server.template.js
+@@ -253,6 +253,12 @@ try {
+   else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
+ } catch (e) {}
+ function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
++/* Server-owned credentials are environment-only. Old client keys are not
++   needed by the environment-backed monitor and must not linger in its file. */
++if (SERVER_KEYS && Array.isArray(subs) && subs.some((s) => s && s.keys)) {
++  subs = subs.map((s) => { const clean = { ...s }; delete clean.keys; return clean; });
++  saveSubs();
++}
+ 
+ /* per-ticker alert-category filtering: the alert key encodes its category */
+ const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
+@@ -944,9 +950,34 @@ async function generatePlan(sym, pack) {
+ 
+ /* ============================ settings persistence ============================ */
+ const SETTINGS_FILE = "/tmp/scanner-settings.json";
++/* Strict allowlist shared by load, save and GET. Never add credentials,
++   account records, device tokens, or arbitrary nested objects here. */
++function publicSettings(input) {
++  const clean = {};
++  if (!input || typeof input !== "object" || Array.isArray(input)) return clean;
++  if (Object.prototype.hasOwnProperty.call(input, "feed") && ["sip", "iex", "sip_delayed"].includes(input.feed)) clean.feed = input.feed;
++  if (Object.prototype.hasOwnProperty.call(input, "alertsOn") && typeof input.alertsOn === "boolean") clean.alertsOn = input.alertsOn;
++  for (const key of ["maxPrice", "minDayVol"]) {
++    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
++    const value = input[key];
++    if ((typeof value !== "number" && typeof value !== "string") || value === "" || typeof value === "string" && !value.trim()) continue;
++    const number = Number(value);
++    if (Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER && (key === "maxPrice" ? number > 0 : number >= 0)) clean[key] = number;
++  }
++  if (Object.prototype.hasOwnProperty.call(input, "ver") && Number.isInteger(input.ver) && input.ver >= 0 && input.ver <= 100) clean.ver = input.ver;
++  return clean;
++}
+ let settings = {};
+-try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
+-function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
++try {
++  const stored = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
++  settings = publicSettings(stored);
++  /* Migrate an existing insecure file without ever logging or returning it. */
++  if (JSON.stringify(stored) !== JSON.stringify(settings)) saveSettings();
++} catch (e) {}
++function saveSettings() {
++  settings = publicSettings(settings);
++  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings), { mode: 0o600 }); } catch (e) {}
++}
+ 
+ /* ============================ static assets ============================ */
+ const SW_JS = `self.addEventListener("push", (e) => {
+@@ -1149,21 +1180,24 @@ const server = http.createServer(async (req, res) => {
+     return;
+   }
+   if (u === "/settings" && req.method === "GET") {
+-    res.writeHead(200, { "Content-Type": "application/json" });
+-    res.end(JSON.stringify(settings));
++    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache" });
++    res.end(JSON.stringify(publicSettings(settings)));
+     return;
+   }
+   if (u === "/settings" && req.method === "POST") {
+     try {
+       const b = JSON.parse(await readBody(req));
+-      if (SERVER_KEYS) { delete b.id; delete b.secret; } /* never store client keys in server-keys mode */
+-      settings = { ...settings, ...b };
++      if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error("Invalid settings object");
++      /* Older clients still submit id/secret with preferences. Ignore ALL
++         unlisted fields in every mode; never restore server-stored keys. */
++      settings = { ...publicSettings(settings), ...publicSettings(b) };
+       saveSettings();
+-      res.writeHead(200, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ ok: true }));
++      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      res.end(JSON.stringify({ ok: true, credentialStorage: "environment-only" }));
+     } catch (e) {
+-      res.writeHead(400, { "Content-Type": "application/json" });
+-      res.end(JSON.stringify({ error: String(e) }));
++      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
++      /* JSON parser messages can contain input fragments, including secrets. */
++      res.end(JSON.stringify({ error: "Invalid settings preferences" }));
+     }
+     return;
+   }
+@@ -1200,7 +1234,7 @@ const server = http.createServer(async (req, res) => {
+       }
+       /* single-user app: a new registration replaces ALL prior subscriptions.
+          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
+-      subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
++      subs = [{ sub: b.subscription, ...(SERVER_KEYS ? {} : { keys: b.keys || {} }), feed: SERVER_KEYS ? SERVER_FEED : b.feed || "sip" }];
+       saveSubs();
+       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
+       res.writeHead(200, { "Content-Type": "application/json" });
+diff --git a/tests/test-settings-security.js b/tests/test-settings-security.js
+new file mode 100644
+index 0000000..f798a21
+--- /dev/null
++++ b/tests/test-settings-security.js
+@@ -0,0 +1,108 @@
++/* No ports, live endpoints, real settings files, credentials, or background
++   monitor are used. Execute the actual source sections in an isolated VM. */
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const path = require("node:path");
++const vm = require("node:vm");
++const { test } = require("node:test");
++const root = path.resolve(__dirname, "..");
++const source = fs.readFileSync(path.join(root, "src/server.template.js"), "utf8");
++const section = (start, end) => {
++  const from = source.indexOf(start), to = source.indexOf(end, from + start.length);
++  assert.ok(from >= 0 && to > from, "Security test anchors must track the real routes");
++  return source.slice(from, to);
++};
++const settingsSection = section('const SETTINGS_FILE = ', '/* ============================ static assets');
++const settingsRoutes = section('  if (u === "/settings" && req.method === "GET")', '  if (u === "/push/status")');
++const subsSection = section('let subs = [];', '/* per-ticker alert-category filtering:');
++const pushRoute = section('  if (u === "/push/register" && req.method === "POST")', '  if (u === "/push/watchlist"');
++function harness(serverKeys, existing = {}, subscriptions = { subs: [] }) {
++  const files = new Map([["/tmp/scanner-settings.json", JSON.stringify(existing)], ["/tmp/scanner-subs.json", JSON.stringify(subscriptions)]]);
++  const writes = [];
++  const context = vm.createContext({
++    fs: {
++      readFileSync: (name) => { if (!files.has(name)) throw new Error("ENOENT"); return files.get(name); },
++      writeFileSync: (name, value) => { writes.push({ name, value }); files.set(name, value); },
++    },
++    SERVER_KEYS: serverKeys, SERVER_FEED: "iex", SUBS_FILE: "/tmp/scanner-subs.json", APNS: null,
++    devices: {}, deviceOk: () => false, console: { log() {} },
++    readBody: async (req) => req.body,
++  });
++  vm.runInContext(`${settingsSection}\n${subsSection}\nasync function request(url, method, body) {
++    const u = url.split('?')[0], req = { url, method, body }, response = {};
++    const res = { writeHead(status, headers) { response.status = status; response.headers = headers; }, end(value) { response.body = value; } };
++    await (async () => { ${settingsRoutes}\n${pushRoute} })();
++    return response;
++  }\nglobalThis.request = request;`, context);
++  return { request: context.request, files, writes, context };
++}
++const parse = response => JSON.parse(response.body);
++
++for (const serverKeys of [false, true]) {
++  test(`settings never load, return or persist credentials (serverKeys=${serverKeys})`, async () => {
++    const h = harness(serverKeys, { id: "fixture-old-id", secret: "fixture-old-secret", keys: { secret: "fixture-nested" }, token: "fixture-token", feed: "sip", maxPrice: "100", minDayVol: 2000000, alertsOn: true, ver: 4 });
++    const expected = { feed: "sip", alertsOn: true, maxPrice: 100, minDayVol: 2000000, ver: 4 };
++    const first = await h.request("/settings?cacheBust=1", "GET", "");
++    assert.deepEqual(parse(first), expected);
++    assert.equal(first.headers["Cache-Control"], "no-store");
++    assert.deepEqual(JSON.parse(h.files.get("/tmp/scanner-settings.json")), expected, "startup migration scrubs old credential fields");
++    const post = await h.request("/settings", "POST", JSON.stringify({ id: "fixture-new-id", secret: "fixture-new-secret", APCA_API_SECRET_KEY: "fixture-env-secret", nested: { secret: "fixture-hidden" }, feed: "iex", maxPrice: "125.5", alertsOn: false }));
++    assert.equal(post.status, 200);
++    const result = parse(await h.request("/settings", "GET", ""));
++    assert.deepEqual(result, { ...expected, feed: "iex", maxPrice: 125.5, alertsOn: false });
++    assert.deepEqual(JSON.parse(h.files.get("/tmp/scanner-settings.json")), result);
++    assert.ok(h.writes.every(write => !write.value.includes("fixture-")), "no secret fixture ever written back to persistence");
++  });
++}
++test("typed allowlist excludes nested secrets, inherited keys, arrays and invalid numeric settings", async () => {
++  const h = harness(false);
++  await h.request("/settings", "POST", '{"__proto__":{"secret":"fixture-prototype"},"feed":{"secret":"fixture-feed"},"maxPrice":{"secret":"fixture-price"},"alertsOn":"fixture-alert","minDayVol":-1,"ver":null}');
++  assert.deepEqual(parse(await h.request("/settings", "GET", "")), {});
++  assert.equal((await h.request("/settings", "POST", "[]")).status, 400);
++  assert.equal((await h.request("/settings", "POST", "null")).status, 400);
++});
++test("malformed JSON errors cannot echo submitted credential fragments", async () => {
++  const h = harness(false);
++  const response = await h.request("/settings", "POST", '{"secret":"fixture-sensitive" BROKEN}');
++  assert.equal(response.status, 400);
++  assert.deepEqual(parse(response), { error: "Invalid settings preferences" });
++  assert.ok(!response.body.includes("fixture-sensitive"));
++});
++test("server-key push storage removes obsolete keys without disabling the legacy per-client monitor", async () => {
++  const initial = { subs: [{ sub: { endpoint: "https://example.test/old-push" }, keys: { id: "fixture-old-id", secret: "fixture-old-secret" }, feed: "sip" }] };
++  const server = harness(true, {}, initial);
++  assert.ok(!server.files.get("/tmp/scanner-subs.json").includes("fixture-old-secret"));
++  await server.request("/push/register", "POST", JSON.stringify({ subscription: { endpoint: "https://example.test/new-push" }, keys: { id: "fixture-new-id", secret: "fixture-new-secret" }, feed: "sip" }));
++  const stored = JSON.parse(server.files.get("/tmp/scanner-subs.json"));
++  assert.equal(stored.subs[0].feed, "iex");assert.equal(stored.subs[0].keys, undefined);
++  const legacy = harness(false, {}, initial);
++  assert.equal(JSON.parse(legacy.files.get("/tmp/scanner-subs.json")).subs[0].keys.id, "fixture-old-id");
++});
++test("proxy still injects server environment credentials and config exposes booleans only", async () => {
++  const prefixRoute = section('  const prefix = Object.keys(ROUTES)', '  if (u === "/health")');
++  const configRoute = section('  if (u === "/config" && req.method === "GET")', '  if (u === "/auth/forget"');
++  let captured;
++  const context = vm.createContext({
++    ROUTES: { "/alpaca": "https://upstream.test" }, SERVER_KEYS: true, SERVER_FEED: "iex", INVITE_CODE: "fixture-invite", deviceOk: () => true,
++    ANTHROPIC_API_KEY: "", PLAN_MODEL: "unused", APNS: null,
++    process: { env: { APCA_API_KEY_ID: "fixture-env-id", APCA_API_SECRET_KEY: "fixture-env-secret" } },
++    fetch: async (_url, options) => { captured = options; return { status: 200, text: async () => '{"bars":{}}' }; },
++  });
++  vm.runInContext(`async function request(url) { const req = {url, method:'GET', headers:{'x-device':'fixture-device','apca-api-key-id':'client-junk'}}, u=url, out={};
++    const res={writeHead(status){out.status=status},end(body){out.body=body}};
++    await(async()=>{${prefixRoute}\n${configRoute}})();return out; } globalThis.request=request;`, context);
++  assert.equal((await context.request("/alpaca/v2/stocks/bars")).status, 200);
++  assert.equal(captured.headers["APCA-API-KEY-ID"], "fixture-env-id");
++  assert.equal(captured.headers["APCA-API-SECRET-KEY"], "fixture-env-secret");
++  const config = await context.request("/config");
++  assert.equal(parse(config).serverKeys, true);assert.equal(parse(config).feed, "iex");
++  assert.ok(!config.body.includes("fixture-env"));assert.ok(!config.body.includes("fixture-invite"));
++});
++test("active deployment server copies match the sanitized canonical source", () => {
++  const expected = source.replace("__ICON_B64__", fs.readFileSync(path.join(root, "build/icon.b64"), "utf8").trim());
++  for (const file of ["server.js", "deploy/server.js"]) {
++    assert.ok(fs.readFileSync(path.join(root, file), "utf8") === expected, `${file} must be rebuilt from src/server.template.js`);
++  }
++  const archived = fs.readFileSync(path.join(root, "momentum-scanner-deploy/server.js"), "utf8");
++  assert.ok(!archived.includes('u === "/settings"'), "Archived pre-settings server should not acquire unrelated features in this hotfix");
++});
+-- 
+2.34.1
+

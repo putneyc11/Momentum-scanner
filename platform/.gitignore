@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+state/
+coverage/
+.DS_Store
+*.log
+apps/ios/build/
+apps/ios/DerivedData/
+apps/ios/Verification/*.xcresult/
+apps/ios/Verification/*.app/
+*.xcuserstate
+xcuserdata/
