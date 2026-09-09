@@ -11,7 +11,7 @@
 | Native Release simulator                                 | Built for arm64 and x86_64; not signed for distribution      |
 | Current official Render JSON schema                      | Blueprint passed; account-side creation/deploy not performed |
 | Dependency audit after patched development-tool upgrades | Zero reported vulnerabilities at verification time           |
-| Separate legacy settings hotfix                          | **7 passed**; committed locally, not pushed/deployed         |
+| Separate legacy settings hotfix                          | **7 passed**; published for review, not merged/deployed      |
 
 The exact Render runtime target, Node 22.23.2 LTS, was downloaded from Node's official release host into an isolated temporary directory and its archive SHA-256 matched the [official release manifest](https://nodejs.org/dist/v22.23.2/SHASUMS256.txt). The user's installed Node version was not changed. The final build and complete JavaScript/TypeScript suite were rerun on that runtime.
 
@@ -27,9 +27,8 @@ Screenshots are in `apps/web/Screenshots/`. Native preview screenshots are in `a
 - No new Alpaca keys were entered or used; no real broker orders were sent.
 - No credentialed SIP/IEX feed test, Render PostgreSQL integration/soak test or real-device production-auth test.
 - No verified profitable research dataset or profitable strategy. The archive has source material, not sufficient real point-in-time training observations.
-- No private source upload: GitHub publishing was blocked by automatic safety review pending explicit approval for `putneyc11/Momentum-scanner`. No bypass was attempted.
 - No new paid Render infrastructure was provisioned. Review the Blueprint and actual displayed costs first.
 
-Local branches prepared for review are `codex/scanner-settings-secret-hotfix` and `codex/momentum-platform-rebuild`. The legacy hotfix commit is `009f6ca`. The new source is prepared under `platform/` for the existing repository; deployment steps are in `RENDER_SETUP.md`.
+After explicit user approval on 9 September 2026, both review branches were pushed to `putneyc11/Momentum-scanner`: [settings hotfix PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4) and [platform rebuild draft PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5). The legacy hotfix commit is `009f6ca`; the initial rebuild commit is `b44e913`. Neither pull request was merged or deployed. The new source lives under `platform/`; deployment steps are in `RENDER_SETUP.md`.
 
 The remaining credential/account/infrastructure gates are listed in `RELEASE_CHECKLIST.md`. Passing local tests is not a claim that those deployment gates have passed.

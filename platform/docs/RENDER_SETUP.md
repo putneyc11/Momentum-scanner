@@ -15,6 +15,19 @@ The old scanner's public `/settings` response exposed stored Alpaca credentials.
 
 This is for the **old** deployed scanner while the new stack is being staged. The variable names differ slightly between old and new code.
 
+### Publish an update to the current website
+
+Verified in Render on 9 September 2026: the current scanner tracks `main` in `putneyc11/Momentum-scanner`, with **Auto-Deploy: On Commit**, an empty Root Directory, build command `yarn`, and start command `yarn start`. Pushing a separate review branch does not update this website.
+
+1. Review [the settings hotfix, PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4).
+2. When ready for the production change, click **Merge pull request**, then **Confirm merge**. This updates `main` and automatically starts the scanner deployment.
+3. Open [the scanner service in Render](https://dashboard.render.com/web/srv-d975j23tqb8s73c0dqbg) and wait for the new deploy to show **Live**. If no deploy starts, choose **Manual Deploy → Deploy latest commit**.
+4. Refresh the scanner website. No ZIP upload, Xcode build, or App Store submission is needed for the web app.
+
+This publishes the targeted settings security fix only. It does not launch the rebuilt dashboard/scanner. Use section B for that separate migration. [Render deploy behavior](https://render.com/docs/deploys)
+
+### Enter replacement keys privately
+
 1. Open [your scanner in Render](https://dashboard.render.com/web/srv-d975j23tqb8s73c0dqbg).
 2. Click **Environment** on the left.
 3. Click **Add Environment Variable**.
@@ -40,8 +53,8 @@ The proposed `render.yaml` contains **two web services, one always-on market/eng
 
 The existing Algo Trader is a **web** service running `node engine.js trade`. Do not convert it to a worker in place; service types are immutable. The new architecture splits that responsibility deliberately.
 
-1. Make sure the rebuilt source has been pushed to a GitHub branch with this directory at `platform/`.
-2. In Render, click **New → Blueprint**, select `putneyc11/Momentum-scanner`, and choose the rebuild branch.
+1. The rebuilt source is published on `codex/momentum-platform-rebuild` under `platform/`, with [draft PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5) for review.
+2. In Render, click **New → Blueprint**, select `putneyc11/Momentum-scanner`, and choose `codex/momentum-platform-rebuild`.
 3. Set the **Blueprint Path** to `platform/render.yaml`.
 4. Review the proposed resource names and prices. The names are `momentum-algo-v2`, `momentum-scanner-v2`, `momentum-market-v2`, and `momentum-state-v2`.
 5. Enter the requested replacement Alpaca keys for **momentum-market-v2 only**. Neither web service nor the iPhone app needs broker credentials.
@@ -50,6 +63,10 @@ The existing Algo Trader is a **web** service running `node engine.js trade`. Do
 8. Once created, open the Algo service's **Environment** page. Render generates an `ADMIN_TOKEN`. Copy it into your password manager, then use it to sign into the new web dashboard. It is the dashboard password, **not** your Alpaca key.
 
 The Blueprint disables automatic deployments so an unrelated push cannot restart trading. It links PostgreSQL internally and blocks public database access. The worker records data and runs nightly research; a second cron job is unnecessary.
+
+The new scanner receives its own Render URL; the existing URL stays on the old app until a deliberate cutover. All three services use Root Directory `platform`. The scanner build command is `npm ci --include=dev && npm run build`, its start command is `npm start`, and its health check is `/ready`. Merely changing the old service's branch while retaining its old root/build/start settings does not launch this rebuild.
+
+For later v2 updates, push reviewed changes to the configured rebuild branch, then choose **Manual Deploy → Deploy latest commit** on each affected v2 service. Scanner/web changes need the scanner web service; shared API/engine changes may also need the Algo web service and market worker. Keep worker deployments controlled because they interrupt and restart the engine.
 
 ### New worker variables
 
@@ -100,9 +117,9 @@ The native build also needs the public `OIDC_CLIENT_ID`, issuer, audience and AP
 
 ## What I still need from you
 
-- Replacement keys entered privately into Render and confirmation whether your market-data entitlement is SIP or IEX.
+- Replacement keys entered privately into Render. Your real-time SIP entitlement is already confirmed.
 - Approval of Render's displayed cost and choice of when to cut over the existing URLs.
-- Apple Developer Team and confirmation that you own `com.momentumscanner.app` (or your desired owned bundle ID).
+- Confirmation that you own `com.momentumscanner.app` (or your desired owned bundle ID). Team `66HLLH4YED` is already recorded.
 - Your production identity-provider account/configuration, support/privacy URLs, app icon and market-data distribution rights.
 
 Do not share passwords or API secrets in chat. Share only public identifiers, account choices and confirmation that setup steps are complete.
