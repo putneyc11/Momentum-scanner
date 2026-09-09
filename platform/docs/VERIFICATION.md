@@ -29,6 +29,6 @@ Screenshots are in `apps/web/Screenshots/`. Native preview screenshots are in `a
 - No verified profitable research dataset or profitable strategy. The archive has source material, not sufficient real point-in-time training observations.
 - No new paid Render infrastructure was provisioned. Review the Blueprint and actual displayed costs first.
 
-After explicit user approval on 9 September 2026, both review branches were pushed to `putneyc11/Momentum-scanner`: [settings hotfix PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4) and [platform rebuild draft PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5). The legacy hotfix commit is `009f6ca`; the initial rebuild commit is `b44e913`. Neither pull request was merged or deployed. The new source lives under `platform/`; deployment steps are in `RENDER_SETUP.md`.
+After explicit user approval on 9 September 2026, both review branches were pushed to `putneyc11/Momentum-scanner`: [settings hotfix PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5) and [platform rebuild draft PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4). The legacy hotfix commit is `009f6ca`; the initial rebuild commit is `b44e913`. Neither pull request was merged or deployed. The new source lives under `platform/`; deployment steps are in `RENDER_SETUP.md`.
 
 The remaining credential/account/infrastructure gates are listed in `RELEASE_CHECKLIST.md`. Passing local tests is not a claim that those deployment gates have passed.

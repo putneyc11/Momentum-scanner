@@ -6,7 +6,7 @@ It removes credentials from settings load/save/GET/POST using a strict preferenc
 
 The patch does not redesign every legacy authentication or proxy boundary. Public preference writes and the old client-owned push mode remain legacy risks. The new platform replaces those patterns with authenticated APIs and server-only broker credentials.
 
-**Published for review, not merged or deployed.** After explicit user approval, this branch was pushed to `putneyc11/Momentum-scanner` and opened as [PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4). The existing scanner automatically deploys `main`, so merging this PR is a production deployment action.
+**Published for review, not merged or deployed.** After explicit user approval, this branch was pushed to `putneyc11/Momentum-scanner` and opened as [PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5). The existing scanner automatically deploys `main`, so merging this PR is a production deployment action.
 
 For a developer reviewing a separate clean checkout of the same base, apply the patch with `git apply --check` first, then apply it normally and run `node --test tests/test-settings-security.js`. Do not overwrite unrelated local edits. The existing working checkout already has this commit on its dedicated branch; it does not need the patch applied again.
 

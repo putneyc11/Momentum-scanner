@@ -19,7 +19,7 @@ This is for the **old** deployed scanner while the new stack is being staged. Th
 
 Verified in Render on 9 September 2026: the current scanner tracks `main` in `putneyc11/Momentum-scanner`, with **Auto-Deploy: On Commit**, an empty Root Directory, build command `yarn`, and start command `yarn start`. Pushing a separate review branch does not update this website.
 
-1. Review [the settings hotfix, PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4).
+1. Review [the settings hotfix, PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5).
 2. When ready for the production change, click **Merge pull request**, then **Confirm merge**. This updates `main` and automatically starts the scanner deployment.
 3. Open [the scanner service in Render](https://dashboard.render.com/web/srv-d975j23tqb8s73c0dqbg) and wait for the new deploy to show **Live**. If no deploy starts, choose **Manual Deploy → Deploy latest commit**.
 4. Refresh the scanner website. No ZIP upload, Xcode build, or App Store submission is needed for the web app.
@@ -53,7 +53,7 @@ The proposed `render.yaml` contains **two web services, one always-on market/eng
 
 The existing Algo Trader is a **web** service running `node engine.js trade`. Do not convert it to a worker in place; service types are immutable. The new architecture splits that responsibility deliberately.
 
-1. The rebuilt source is published on `codex/momentum-platform-rebuild` under `platform/`, with [draft PR #5](https://github.com/putneyc11/Momentum-scanner/pull/5) for review.
+1. The rebuilt source is published on `codex/momentum-platform-rebuild` under `platform/`, with [draft PR #4](https://github.com/putneyc11/Momentum-scanner/pull/4) for review.
 2. In Render, click **New → Blueprint**, select `putneyc11/Momentum-scanner`, and choose `codex/momentum-platform-rebuild`.
 3. Set the **Blueprint Path** to `platform/render.yaml`.
 4. Review the proposed resource names and prices. The names are `momentum-algo-v2`, `momentum-scanner-v2`, `momentum-market-v2`, and `momentum-state-v2`.
