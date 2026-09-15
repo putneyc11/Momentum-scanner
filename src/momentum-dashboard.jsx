@@ -14,12 +14,11 @@ const TRADING_URL = "https://paper-api.alpaca.markets";
 const SESSION_START_ET = 4;      // premarket tape opens 4:00 AM ET
 const OPEN_ET_MIN = 9 * 60 + 30; // 9:30 AM ET in minutes
 const PREMARKET_START_MIN = 4 * 60; // 4:00 AM ET in minutes
-/* Premarket discovery gates. The RTH gates (≥25% day, minDayVol) are
-   FULL-DAY numbers — at 5 AM nothing on the tape can meet them, which is
-   why the list used to sit empty until the open. Premarket runs its own
-   floors: gap vs the prior close and CUMULATIVE PREMARKET volume. */
-const PM_PCT_FLOOR = 10;   // display floor: ≥10% gap vs prior close
-const PM_MIN_VOL = 25000;  // premarket cumulative shares — permissive at 4 AM, filters one-lot junk
+/* Premarket discovery gates. Same bar as regular hours: ≥25% vs the prior
+   close, and the user's day-volume floor (default 2M) measured on CUMULATIVE
+   PREMARKET shares — nothing under 25% and the floor reaches the list. (The
+   old 10% / 25k premarket gates filled the scanner with sub-25% names.) */
+const PM_PCT_FLOOR = 25;   // display floor: ≥25% gap vs prior close
 const PM_CAND_PCT = 3;     // sweep candidate floor (mirrors the RTH sweep)
 
 const FEED_MODES = {
@@ -992,7 +991,7 @@ function AboutPage({ onClose }) {
           Every listed non-OTC symbol is swept and ranked by setup score: float rotation (volume ÷ float), price vs VWAP, the EMA 8&gt;21&gt;50 stack, Supertrend(10,3) on 5-minute bars, capped day momentum, and 5-minute volume surge — A ≥80 · B ≥65 · C ≥50 · D below.
         </S>
         <S title="Sessions">
-          PREMARKET (4:00–9:30 AM ET): live snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% on ≥{fv(PM_MIN_VOL)} premarket shares, resetting each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% with real day volume, prices refreshing every 3 seconds. AFTER HOURS (4:00–8:00 PM ET): a separate full-market table — the top 10 by AH % against the 4:00 close, no percentage floor, illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) excluded, true cumulative AH volume shown.
+          PREMARKET (4:00–9:30 AM ET): live snapshots against the prior close — the list auto-populates from the 4:00 AM open with gappers ≥{PM_PCT_FLOOR}% whose cumulative premarket volume clears your day-volume floor, resetting each new day. REGULAR HOURS: top 15 by score among stocks up ≥25% with real day volume, prices refreshing every 3 seconds. AFTER HOURS (4:00–8:00 PM ET): a separate full-market table — the top 10 by AH % against the 4:00 close, no percentage floor, illiquid names (&lt;{fv(AH_MIN_VOL)} real AH shares) excluded, true cumulative AH volume shown.
         </S>
         <S title="Row indicators">
           📰 marks a catalyst headline from the last 48 hours; a red ⚠dil means recent news carries dilution-risk language (offerings, placements, reverse splits). ×F is live float rotation, with alerts at each 1×/2×/3× milestone. ⛔ shows minutes since a suspected halt.
@@ -3113,11 +3112,10 @@ export default function App() {
           ranked.push({ symbol: s, price: p, pct: ((p - prev) / prev) * 100, change: p - prev, dayVol: lastB.v, prevClose: prev });
         }
       }
-      /* HARD FLOOR: the RTH list only carries real movers, ≥25% on the day.
-         (Movers-endpoint symbols used to slip in below the sweep threshold —
-         that's how a +7% large cap ended up graded on your list.)
-         Premarket uses its own ≥10% gap floor — 25% of the day's move often
-         hasn't happened yet at 5 AM. */
+      /* HARD FLOOR: the list only carries real movers, ≥25% — on the day in
+         regular hours, vs the prior close in premarket. (Movers-endpoint
+         symbols used to slip in below the sweep threshold — that's how a +7%
+         large cap ended up graded on your list.) */
       const movers25 = ranked.filter((g) => g.pct >= (pmMode ? PM_PCT_FLOOR : 25));
       movers25.sort((a, b) => b.pct - a.pct);
       watchAllRef.current = movers25.slice(0, 30).map((g) => g.symbol);
@@ -3143,11 +3141,12 @@ export default function App() {
         pmVol[s] = v;
       }
       if (pmMode) {
-        /* premarket rows show PREMARKET volume, and thin tape is dropped —
-           this (not the 5M full-day floor) is the premarket liquidity gate */
+        /* premarket rows show PREMARKET volume, and the user's day-volume
+           floor applies to it — the same 2M bar as regular hours */
+        const pmFloor = Number(minDayVol || 0);
         for (const g of pool) g.dayVol = pmVol[g.symbol] || 0;
-        pool = pool.filter((g) => g.dayVol >= PM_MIN_VOL);
-        watchAllRef.current = watchAllRef.current.filter((s) => pmVol[s] == null || pmVol[s] >= PM_MIN_VOL);
+        pool = pool.filter((g) => g.dayVol >= pmFloor);
+        watchAllRef.current = watchAllRef.current.filter((s) => pmVol[s] == null || pmVol[s] >= pmFloor);
       }
       for (const g of pool) {
         const flVal = getFloat(g.symbol);
@@ -3445,7 +3444,7 @@ export default function App() {
         <div style={{ flex: 1 }} />
         <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>
           {pmNow
-            ? `PREMARKET · ≤$${maxPrice} · ≥${fv(PM_MIN_VOL)} PM vol · ≥${PM_PCT_FLOOR}% gap · ${found} movers`
+            ? `PREMARKET · ≤$${maxPrice} · ≥${fv(minDayVol)} PM vol · ≥${PM_PCT_FLOOR}% gap · ${found} movers`
             : `≤$${maxPrice} · ≥${fv(minDayVol)} vol · ≥25% day · ${found} movers`} · {feedMode(feed).short} · {updated ? `upd ${ftime(updated)} ET` : "loading…"}
         </span>
         <button onClick={toggleAlerts} aria-label={alertsOn ? "alerts on — tap to switch off" : "alerts off — tap to switch on"}

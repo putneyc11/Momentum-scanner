@@ -52,7 +52,7 @@ support/resistance targets, and a full-screen advanced chart with live ticks.
   it before changing discovery, alerts, or the build
 
 The scanner is session-aware: premarket (4:00–9:30 AM ET) discovery runs on
-Alpaca snapshots vs the prior close (≥10% gap, ≥25k premarket shares) and the
+Alpaca snapshots vs the prior close (≥25% gap, premarket shares ≥ the day-volume floor, 2M by default) and the
 watchlist auto-populates fresh from the 4:00 AM open each day; regular hours
 use the full-day sweep (≥25% day, min day volume). Tapping a row opens the
 Advanced chart directly.

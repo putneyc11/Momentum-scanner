@@ -17,8 +17,8 @@ const OFFSET = TARGET - Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 const dayISO = (o) => iso(TARGET + o * 864e5 - 90000);
 
-const PREV = { GAPPY: 3.0, THINY: 1.0, SPLITR: 10.0 };  // split-ADJUSTED prior closes
-const LIVE = { GAPPY: 4.5, THINY: 2.0, SPLITR: 10.0 };  // live premarket prints
+const PREV = { GAPPY: 3.0, THINY: 1.0, SPLITR: 10.0, MIDGAP: 2.0, THINGAP: 1.0 };  // split-ADJUSTED prior closes
+const LIVE = { GAPPY: 4.5, THINY: 2.0, SPLITR: 10.0, MIDGAP: 2.3, THINGAP: 1.5 };  // live premarket prints — MIDGAP +15% heavy, THINGAP +50% on 840k
 function snapshots(syms) {
   const out = {};
   for (const s of syms) {
@@ -42,7 +42,7 @@ function bars5(sym) { // 4:00 ET → now, 5-min candles; GAPPY heavy, THINY ~4k 
   const a = [];
   for (let i = 0; i < 42; i++) {
     const c = LIVE[sym] * (0.9 + i * 0.0025);
-    a.push({ t: iso(start + i * 5 * 60000), o: c - 0.01, h: c + 0.02, l: c - 0.03, c, v: sym === 'THINY' ? 100 : 50000 });
+    a.push({ t: iso(start + i * 5 * 60000), o: c - 0.01, h: c + 0.02, l: c - 0.03, c, v: sym === 'THINY' ? 100 : sym === 'THINGAP' ? 20000 : 50000 });
   }
   return a;
 }
@@ -65,7 +65,7 @@ function bars1(sym, n) {
     window.Date = F;
   }, [OFFSET]);
   await page.addInitScript(() => localStorage.setItem('alpaca-keys', JSON.stringify({ id: 'K', secret: 'S', feed: 'sip', maxPrice: 100, minDayVol: 5000000, ver: 3 })));
-  const SY = ['GAPPY', 'THINY', 'SPLITR'];
+  const SY = ['GAPPY', 'THINY', 'SPLITR', 'MIDGAP', 'THINGAP'];
   await page.route('**/push/**', (r) => r.fulfill({ json: { ok: true, key: 'x' } }));
   await page.route('**/push/watchlist', (r) => { syncedSyms = JSON.parse(r.request().postData() || '{}').symbols || []; r.fulfill({ json: { ok: true } }); });
   await page.route('**/settings', (r) => r.fulfill({ json: {} }));
@@ -110,6 +110,8 @@ function bars1(sym, n) {
   // ---- 3) premarket gates: thin tape and phantom splits stay off the list ----
   console.log(!listSlice.includes('THINY') ? '✓ thin premarket tape (~4k shares) volume-gated off the list' : '✗ THINY leaked through the volume gate');
   console.log(!listSlice.includes('SPLITR') ? '✓ reverse-split phantom (+900% raw) split-guarded off the list' : '✗ SPLITR phantom listed');
+  console.log(!listSlice.includes('MIDGAP') ? '✓ a +15% gapper on heavy volume stays OFF the premarket list (floor is 25%)' : '✗ MIDGAP (+15%) leaked onto the premarket list');
+  console.log(!listSlice.includes('THINGAP') ? '✓ a +50% gapper on 840k premarket shares stays OFF (floor is the 2M day-volume setting)' : '✗ THINGAP (840k shares) leaked onto the premarket list');
 
   // ---- 4) header advertises the premarket session gates ----
   console.log(body.includes('PREMARKET') ? '✓ header shows PREMARKET session gates' : '✗ header not session-aware');
