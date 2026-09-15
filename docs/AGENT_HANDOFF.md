@@ -275,6 +275,11 @@ Gotchas that will waste your time:
   replay's "old rules" column uses it).
 - **Volume floor 2M.** Client default `minDayVol` 5M → 2M; a saved setup
   still on 5M is migrated (settings `ver` 4).
+- **Premarket floors (2026-09-15).** Premarket now uses the same bar as
+  regular hours: ≥25% vs the prior close and cumulative premarket volume ≥
+  `minDayVol`. `PM_MIN_VOL` is gone; `PM_PCT_FLOOR` is 25. The old 10% / 25k
+  gates were filling the scanner with sub-25% names. The After Hours table
+  is unchanged (top 10 by AH %, 25k AH shares, no % floor).
 - **Tape replay.** `POST /backtest {symbol}` replays today's 1-min bars
   through old / recommended / all (`backtestSymbol`, pure, unit-tested with a
   GCDT-shaped tape) and reports when each would have listed the symbol and

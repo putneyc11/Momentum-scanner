@@ -571,7 +571,7 @@ function backtestSymbol(arr, prevClose, opts) {
       const M = modes[m];
       /* discovery: the list only carries a symbol once it clears the floor —
          premarket by gap, regular hours by ≥25% day on the volume floor */
-      const qualifies = pm ? (pct >= 10 && cum >= 25000) : (pct >= 25 && cum >= M.floor);
+      const qualifies = pct >= 25 && cum >= M.floor; /* same bar premarket and regular hours */
       if (!out.entered[m]) { if (!qualifies) continue; out.entered[m] = b.t; }
       if (M.legacy) {
         const ts = trigSt[m] || (trigSt[m] = {});

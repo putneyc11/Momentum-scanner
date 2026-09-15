@@ -25,7 +25,7 @@ discovery feed.
 ## What the product does
 
 - Full-market, session-aware discovery on Alpaca SIP data: premarket
-  snapshots vs prior close (≥10% gap + real premarket volume), RTH
+  snapshots vs prior close (≥25% gap + the day-volume floor on premarket shares), RTH
   daily bars (≥25% + volume floor), separate After-Hours top-10 table
   (no % floor, illiquid names excluded).
 - Live 3-second price ticks on all listed rows; setup score A–D per row

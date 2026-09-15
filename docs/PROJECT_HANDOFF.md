@@ -70,8 +70,8 @@ framework, canvas charts, mono/dark terminal aesthetic):
   The first sweep of a new ET day wipes all list/alert state, so the
   watchlist auto-populates fresh from the 4:00 AM open.
 - **Watchlist**: top 15 by setup score. RTH gates: ≥25% day / ≥5M day vol /
-  $0.03–$100. PREMARKET gates: ≥10% gap (PM_PCT_FLOOR) and ≥25k cumulative
-  premarket shares (PM_MIN_VOL, computed from the 5Min bars — snapshots
+  $0.03–$100. PREMARKET gates (since 2026-09-15): ≥25% gap (PM_PCT_FLOOR) and cumulative
+  premarket shares ≥ minDayVol (2M default, computed from the 5Min bars — snapshots
   carry no premarket cumulative volume); rows show PREMARKET volume.
   Setup score 0–100: float rotation, VWAP position, EMA 8>21>50
   stack, Supertrend(10,3) on 5-min, capped day %, 5-min volume surge. Grades
