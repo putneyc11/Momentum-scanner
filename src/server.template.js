@@ -253,6 +253,12 @@ try {
   else { subs = saved.subs || []; watch = saved.watch || []; watchPrefs = saved.watchPrefs || {}; watchMode = saved.watchMode === "all" ? "all" : "rec"; }
 } catch (e) {}
 function saveSubs() { try { fs.writeFileSync(SUBS_FILE, JSON.stringify({ subs, watch, watchPrefs, watchMode })); } catch (e) {} }
+/* Server-owned credentials are environment-only. Old client keys are not
+   needed by the environment-backed monitor and must not linger in its file. */
+if (SERVER_KEYS && Array.isArray(subs) && subs.some((s) => s && s.keys)) {
+  subs = subs.map((s) => { const clean = { ...s }; delete clean.keys; return clean; });
+  saveSubs();
+}
 
 /* per-ticker alert-category filtering: the alert key encodes its category */
 const CAT_MARKS = [["setup", "-setup-"], ["vwap", "-vwapx"], ["ema", "-emax"], ["pmh", "-pmh"], ["mom3", "-mom3-"], ["vol", "-vol-"], ["halt", "-halt-"], ["halt", "-resume-"]];
@@ -944,9 +950,34 @@ async function generatePlan(sym, pack) {
 
 /* ============================ settings persistence ============================ */
 const SETTINGS_FILE = "/tmp/scanner-settings.json";
+/* Strict allowlist shared by load, save and GET. Never add credentials,
+   account records, device tokens, or arbitrary nested objects here. */
+function publicSettings(input) {
+  const clean = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return clean;
+  if (Object.prototype.hasOwnProperty.call(input, "feed") && ["sip", "iex", "sip_delayed"].includes(input.feed)) clean.feed = input.feed;
+  if (Object.prototype.hasOwnProperty.call(input, "alertsOn") && typeof input.alertsOn === "boolean") clean.alertsOn = input.alertsOn;
+  for (const key of ["maxPrice", "minDayVol"]) {
+    if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+    const value = input[key];
+    if ((typeof value !== "number" && typeof value !== "string") || value === "" || typeof value === "string" && !value.trim()) continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number <= Number.MAX_SAFE_INTEGER && (key === "maxPrice" ? number > 0 : number >= 0)) clean[key] = number;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "ver") && Number.isInteger(input.ver) && input.ver >= 0 && input.ver <= 100) clean.ver = input.ver;
+  return clean;
+}
 let settings = {};
-try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
-function saveSettings() { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (e) {} }
+try {
+  const stored = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+  settings = publicSettings(stored);
+  /* Migrate an existing insecure file without ever logging or returning it. */
+  if (JSON.stringify(stored) !== JSON.stringify(settings)) saveSettings();
+} catch (e) {}
+function saveSettings() {
+  settings = publicSettings(settings);
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings), { mode: 0o600 }); } catch (e) {}
+}
 
 /* ============================ static assets ============================ */
 const SW_JS = `self.addEventListener("push", (e) => {
@@ -1149,21 +1180,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (u === "/settings" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(settings));
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache" });
+    res.end(JSON.stringify(publicSettings(settings)));
     return;
   }
   if (u === "/settings" && req.method === "POST") {
     try {
       const b = JSON.parse(await readBody(req));
-      if (SERVER_KEYS) { delete b.id; delete b.secret; } /* never store client keys in server-keys mode */
-      settings = { ...settings, ...b };
+      if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error("Invalid settings object");
+      /* Older clients still submit id/secret with preferences. Ignore ALL
+         unlisted fields in every mode; never restore server-stored keys. */
+      settings = { ...publicSettings(settings), ...publicSettings(b) };
       saveSettings();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: true, credentialStorage: "environment-only" }));
     } catch (e) {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: String(e) }));
+      res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      /* JSON parser messages can contain input fragments, including secrets. */
+      res.end(JSON.stringify({ error: "Invalid settings preferences" }));
     }
     return;
   }
@@ -1200,7 +1234,7 @@ const server = http.createServer(async (req, res) => {
       }
       /* single-user app: a new registration replaces ALL prior subscriptions.
          (Safari sub + installed-PWA sub on the same phone = every alert doubled) */
-      subs = [{ sub: b.subscription, keys: b.keys || {}, feed: b.feed || "sip" }];
+      subs = [{ sub: b.subscription, ...(SERVER_KEYS ? {} : { keys: b.keys || {} }), feed: SERVER_KEYS ? SERVER_FEED : b.feed || "sip" }];
       saveSubs();
       console.log("push subscription registered — monitor covering", subs.length, "device(s)");
       res.writeHead(200, { "Content-Type": "application/json" });
