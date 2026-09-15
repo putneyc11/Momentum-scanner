@@ -148,6 +148,7 @@ export interface Research {
 export interface Stock {
   symbol: string;
   price: number;
+  previousClose?: number | null;
   changePct: number;
   volume: number;
   relativeVolume: number;

@@ -20,6 +20,7 @@ import {
   StateBadge,
 } from "./ui";
 import Chart from "./Chart";
+import { applyScannerTick, qualifiesMover } from "./scanner-state";
 
 const frames: Record<string, { label: string; seconds: number }> = {
   "1Min": { label: "1m", seconds: 60 },
@@ -95,7 +96,7 @@ export function updateTickBar(
   ].slice(-2000);
 }
 export default function ScannerPage({ mode }: { mode: Mode }) {
-  const r = useResource<Scanner>("/scanner", 15000);
+  const r = useResource<Scanner>("/scanner?scope=tracked", 15000);
   const [selected, setSelected] = useState("");
   const [query, setQuery] = useState("");
   const [timeframe, setTimeframe] = useState("1Min");
@@ -116,8 +117,8 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
     10000,
   );
   useEffect(() => {
-    if (!selected && r.data?.stocks.length)
-      setSelected(r.data.stocks[0].symbol);
+    const firstMover = r.data?.stocks.find(qualifiesMover);
+    if (!selected && firstMover) setSelected(firstMover.symbol);
   }, [r.data, selected]);
   useEffect(() => {
     localStorage.setItem("momentum-watchlist", JSON.stringify(watch));
@@ -160,12 +161,7 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
           previous
             ? {
                 ...previous,
-                stocks: previous.stocks.map((stock) =>
-                  stock.symbol === symbol &&
-                  Date.parse(time) >= Date.parse(stock.updatedAt)
-                    ? { ...stock, price, updatedAt: time }
-                    : stock,
-                ),
+                stocks: applyScannerTick(previous.stocks, symbol, price, time),
               }
             : previous,
         );
@@ -190,6 +186,7 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
       (r.data?.stocks || [])
         .filter(
           (s) =>
+            qualifiesMover(s) &&
             s.symbol.toLowerCase().includes(query.toLowerCase()) &&
             s.relativeVolume >= minimum &&
             (!watchOnly || watch.includes(s.symbol)),
@@ -271,6 +268,9 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
           className="scanner-list"
         >
           <div className="scanner-filters">
+            <span className="subtle">
+              Daily gain &gt; +25% · vs. previous close
+            </span>
             <label className="search-field">
               <MagnifyingGlass />
               <input
@@ -323,8 +323,8 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
             <div className="scanner-loading skeleton" />
           ) : !stocks.length ? (
             <Empty title="No matching symbols">
-              Adjust the filters, or enter a ticker and press Enter to analyze
-              it.
+              No tracked symbols are up more than 25% with these filters. You
+              can still enter a tracked ticker and press Enter to inspect it.
             </Empty>
           ) : (
             <div className="movers-table">
@@ -426,6 +426,12 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
                   <span>Last event {timeOnly(feed?.lastEventAt)} ET</span>
                 </div>
               </div>
+              {stock && !qualifiesMover(stock) && (
+                <p className="scanner-note">
+                  Outside the &gt; +25% mover filter. Kept open for inspection;
+                  your watchlist and the worker's tracking are unchanged.
+                </p>
+              )}
               {detail.error && (
                 <ErrorNotice
                   message={detail.error}
@@ -457,7 +463,7 @@ export default function ScannerPage({ mode }: { mode: Mode }) {
               ) : d ? (
                 <>
                   <Chart
-                    key={selected}
+                    key={`${selected}:${timeframe}`}
                     bars={d.bars}
                     title={`${selected} · price action`}
                     compact

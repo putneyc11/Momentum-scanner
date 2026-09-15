@@ -53,6 +53,68 @@ describe("API boundary", () => {
       .expect(200);
     expect(r.body.stocks).toEqual([]);
   });
+  it("qualifies default scanner movers above 25% without changing the worker universe", async () => {
+    const { store, app } = await setup();
+    const stocks = [26, 25, 24.99, -14].map((changePct, i) => ({
+      symbol: `S${i}`,
+      price: 10 * (1 + changePct / 100),
+      changePct,
+      volume: 10000,
+      relativeVolume: 2,
+      score: 99,
+      spreadBps: null,
+      updatedAt: "2026-09-15T19:00:00Z",
+    }));
+    await store.put("scanner", {
+      asOf: "2026-09-15T19:00:00Z",
+      feed: { state: "live" },
+      stocks,
+    });
+    const auth = "Bearer " + "v".repeat(40);
+    const movers = await request(app)
+      .get("/api/v1/scanner")
+      .set("Authorization", auth)
+      .expect(200);
+    expect(movers.body.stocks.map((s: any) => s.symbol)).toEqual(["S0"]);
+    expect(movers.body.stocks[0].previousClose).toBeCloseTo(10);
+    expect(movers.body.criteria).toEqual({
+      minimumChangePct: 25,
+      comparison: "gt",
+      basis: "previousClose",
+    });
+    const tracked = await request(app)
+      .get("/api/v1/scanner?scope=tracked")
+      .set("Authorization", auth)
+      .expect(200);
+    expect(tracked.body.stocks.map((s: any) => s.symbol)).toEqual([
+      "S0",
+      "S1",
+      "S2",
+      "S3",
+    ]);
+    expect((await store.get<any>("scanner", null)).stocks).toEqual(stocks);
+    await request(app).get("/api/v1/scanner?scope=tracked").expect(401);
+    await request(app)
+      .get("/api/v1/scanner?scope=anything")
+      .set("Authorization", auth)
+      .expect(400);
+  });
+  it("keeps explicit below-threshold symbol inspection independent of mover membership", async () => {
+    const { store, app } = await setup();
+    await store.put("market:LOW", {
+      symbol: "LOW",
+      bars: [],
+      trades: [],
+      quote: null,
+      feed: { state: "live" },
+    });
+    const detail = await request(app)
+      .get("/api/v1/scanner/LOW")
+      .set("Authorization", "Bearer " + "v".repeat(40))
+      .expect(200);
+    expect(detail.body.symbol).toBe("LOW");
+    expect(detail.body.bars).toEqual([]);
+  });
   it("uses HttpOnly cookie login and blocks cross-origin mutations", async () => {
     const { app } = await setup();
     await request(app)

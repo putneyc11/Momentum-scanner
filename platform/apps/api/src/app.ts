@@ -16,7 +16,12 @@ import { Store, type StoreEvent } from "./store.js";
 import { auth, streamLifetime, type AuthedRequest } from "./auth.js";
 import { safeError, type Config } from "./config.js";
 import { publicTrade, publicMetrics, strategyView } from "./demo.js";
-import { analyze, aggregateBars } from "./market.js";
+import { analyze, aggregateBars, type Stock } from "./market.js";
+import {
+  qualifiesMover,
+  withPreviousClose,
+  SCANNER_MIN_CHANGE_PCT,
+} from "./scanner.js";
 import { queueResearch, executeResearch } from "./research.js";
 import { candidateEvidence, type Candidate } from "./promotion.js";
 
@@ -111,19 +116,34 @@ export function createApp(c: Config, store: Store) {
     }),
   );
   // Both browser cookie sessions and native bearer tokens access the same versioned market API.
-  app.get("/api/v1/scanner", async (_req, res) => {
-    res.json(
-      await store.get("scanner", {
-        asOf: null,
-        feed: await store.get("feed", {
-          state: "unconfigured",
-          feed: c.ALPACA_DATA_FEED,
-          lastEventAt: null,
-          error: "Waiting for market worker",
-        }),
-        stocks: [],
+  app.get("/api/v1/scanner", async (req, res) => {
+    const scope = z
+      .enum(["movers", "tracked"])
+      .default("movers")
+      .parse(req.query.scope);
+    const snapshot = await store.get("scanner", {
+      asOf: null,
+      feed: await store.get("feed", {
+        state: "unconfigured",
+        feed: c.ALPACA_DATA_FEED,
+        lastEventAt: null,
+        error: "Waiting for market worker",
       }),
-    );
+      stocks: [] as Stock[],
+    });
+    // The web keeps an explicit tracked cache so live ticks can move symbols
+    // into/out of the visible list without deleting research or position data.
+    const stocks = snapshot.stocks.map(withPreviousClose);
+    res.json({
+      ...snapshot,
+      stocks: scope === "tracked" ? stocks : stocks.filter(qualifiesMover),
+      scope,
+      criteria: {
+        minimumChangePct: SCANNER_MIN_CHANGE_PCT,
+        comparison: "gt",
+        basis: "previousClose",
+      },
+    });
   });
   app.get("/api/v1/scanner/:symbol", async (req, res) => {
     const symbol = z

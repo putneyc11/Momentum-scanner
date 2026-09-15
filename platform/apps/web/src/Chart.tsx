@@ -8,32 +8,17 @@ import {
 } from "@phosphor-icons/react";
 import type { Bar, EquityPoint, Trade } from "./types";
 import { money, number, timeOnly, easternDate } from "./format";
-
-const windows: Record<string, number> = {
-  "1H": 3600000,
-  "4H": 14400000,
-  "1D": 86400000,
-  "1W": 604800000,
-  "1M": 2592000000,
-  ALL: Infinity,
-};
-export function chartWindow(times: number[], range: string): [number, number] {
-  if (times.length < 2) return [0, Math.max(1, times.length - 1)];
-  const end = times.length - 1;
-  const min = times[end] - (windows[range] ?? Infinity);
-  const found = times.findIndex((t) => t >= min);
-  return [Math.max(0, Math.min(found, end - 1)), end];
-}
-export function clampWindow(
-  start: number,
-  end: number,
-  count: number,
-): [number, number] {
-  const max = Math.max(1, count - 1);
-  const width = Math.min(max, Math.max(Math.min(2, max), end - start));
-  const left = Math.max(0, Math.min(start, max - width));
-  return [left, left + width];
-}
+import {
+  chartRanges,
+  clampViewport,
+  followViewport,
+  hoverIndex,
+  rangeViewport,
+  updateViewport,
+  zoomViewport,
+  type FollowMode,
+} from "./chartViewport";
+export { chartWindow, clampWindow } from "./chartViewport";
 export default function Chart({
   points = [],
   bars = [],
@@ -72,7 +57,13 @@ export default function Chart({
     [points, bars, candles],
   );
   const [range, setRange] = useState("1D");
-  const [view, setView] = useState<[number, number]>([0, 1]);
+  const [view, setView] = useState<[number, number]>(() =>
+    rangeViewport(
+      data.map((p) => p.time),
+      "1D",
+    ),
+  );
+  const [followMode, setFollowMode] = useState<FollowMode>("range");
   const [hover, setHover] = useState<number | null>(null);
   const [showDrawdown, setShowDrawdown] = useState(false);
   const [showTrades, setShowTrades] = useState(true);
@@ -92,23 +83,12 @@ export default function Chart({
       times[0] !== previous[0] ||
       times.at(-1) !== previous.at(-1);
     if (changed && times.length)
-      setView((current) => {
-        if (range !== "CUSTOM" || !previous.length)
-          return chartWindow(times, range);
-        const anchor =
-          previous[Math.min(previous.length - 1, Math.floor(current[0]))];
-        const index = Math.max(
-          0,
-          times.findIndex((time) => time >= anchor),
-        );
-        return clampWindow(
-          index + (current[0] % 1),
-          index + (current[0] % 1) + (current[1] - current[0]),
-          times.length,
-        );
-      });
+      setView((current) =>
+        updateViewport(current, previous, times, followMode, range),
+      );
+    if (changed) setHover(null);
     priorTimes.current = times;
-  }, [data, range]);
+  }, [data, range, followMode]);
   useEffect(() => {
     const el = root.current;
     if (!el) return;
@@ -121,10 +101,13 @@ export default function Chart({
   }, [data.length > 0]);
   const selectRange = (r: string) => {
     setRange(r);
+    setFollowMode("range");
+    setHover(null);
     setFrom("");
     setTo("");
+    setDateError("");
     setView(
-      chartWindow(
+      rangeViewport(
         data.map((p) => p.time),
         r,
       ),
@@ -170,16 +153,28 @@ export default function Chart({
     : "";
   const active = hover !== null ? data[hover] : null;
   const zoom = (factor: number, center = (view[0] + view[1]) / 2) => {
-    const left = center - (center - view[0]) * factor;
     setView(
-      clampWindow(left, left + (view[1] - view[0]) * factor, data.length),
+      zoomViewport(view, data.length, factor, followMode !== "manual", center),
     );
+    if (followMode !== "manual") setFollowMode("live");
+    setHover(null);
     setRange("CUSTOM");
   };
   const pan = (direction: number) => {
     const offset = (view[1] - view[0]) * 0.2 * direction;
-    setView(clampWindow(view[0] + offset, view[1] + offset, data.length));
+    setView(clampViewport(view[0] + offset, view[1] + offset, data.length));
+    setFollowMode("manual");
+    setHover(null);
     setRange("CUSTOM");
+  };
+  const followLatest = () => {
+    setView(followViewport(data.length, view[1] - view[0]));
+    setFollowMode("live");
+    setHover(null);
+    setRange("CUSTOM");
+    setFrom("");
+    setTo("");
+    setDateError("");
   };
   const dateRange = () => {
     if (!from && !to) return;
@@ -190,7 +185,12 @@ export default function Chart({
       return;
     }
     setDateError("");
-    setView(clampWindow(a, b, data.length));
+    // Half a slot at each selected edge keeps complete historical candles visible.
+    const span = Math.max(4, b - a + 1);
+    const center = (a + b) / 2;
+    setView(clampViewport(center - span / 2, center + span / 2, data.length));
+    setFollowMode("manual");
+    setHover(null);
     setRange("CUSTOM");
   };
   const markerTrades = showTrades
@@ -216,7 +216,7 @@ export default function Chart({
           </span>
         </div>
         <div className="segmented" aria-label="Chart date range">
-          {Object.keys(windows).map((r) => (
+          {Object.keys(chartRanges).map((r) => (
             <button
               className={range === r ? "selected" : ""}
               aria-pressed={range === r}
@@ -253,6 +253,9 @@ export default function Chart({
             {number(active.bar.low)} · V {number(active.bar.volume, 0)}
           </span>
         )}
+        <span>
+          {followMode === "manual" ? "Historical view" : "Following latest"}
+        </span>
       </div>
       {!data.length ? (
         <div className="empty chart-empty">
@@ -283,7 +286,10 @@ export default function Chart({
             const rect = e.currentTarget.getBoundingClientRect();
             const ratio = Math.max(
               0,
-              Math.min(1, (e.clientX - rect.left) / rect.width),
+              Math.min(
+                1,
+                (((e.clientX - rect.left) / rect.width) * W - L) / PW,
+              ),
             );
             zoom(
               e.deltaY > 0 ? 1.15 : 0.85,
@@ -292,6 +298,7 @@ export default function Chart({
           }}
           onPointerDown={(e) => {
             drag.current = { x: e.clientX, view };
+            setHover(null);
             e.currentTarget.setPointerCapture(e.pointerId);
           }}
           onPointerUp={(e) => {
@@ -312,24 +319,17 @@ export default function Chart({
                 ((e.clientX - drag.current.x) / ((rect.width * PW) / W)) *
                 (drag.current.view[1] - drag.current.view[0]);
               setView(
-                clampWindow(
+                clampViewport(
                   drag.current.view[0] - offset,
                   drag.current.view[1] - offset,
                   data.length,
                 ),
               );
+              setFollowMode("manual");
               setRange("CUSTOM");
             } else {
               const px = ((e.clientX - rect.left) / rect.width) * W;
-              setHover(
-                Math.max(
-                  0,
-                  Math.min(
-                    data.length - 1,
-                    Math.round(view[0] + ((px - L) / PW) * (view[1] - view[0])),
-                  ),
-                ),
-              );
+              setHover(hoverIndex(view, (px - L) / PW, data.length));
             }
           }}
         >
@@ -361,10 +361,8 @@ export default function Chart({
             );
           })}
           {[0, 1, 2, 3, 4].map((i) => {
-            const index = Math.min(
-              data.length - 1,
-              Math.max(0, Math.round(view[0] + ((view[1] - view[0]) * i) / 4)),
-            );
+            const index = hoverIndex(view, i / 4, data.length);
+            if (index === null) return null;
             return (
               <text
                 key={i}
@@ -421,6 +419,14 @@ export default function Chart({
                   strokeWidth="2"
                   vectorEffect="non-scaling-stroke"
                 />
+                {positions.length === 1 && (
+                  <circle
+                    cx={x(positions[0].i)}
+                    cy={y(positions[0].p.value)}
+                    r="3"
+                    fill="var(--accent)"
+                  />
+                )}
               </>
             )}
             {showDrawdown && !candles && (
@@ -530,10 +536,16 @@ export default function Chart({
           <button
             className="icon-button"
             aria-label="Reset chart"
+            title="Reset to all history and follow latest"
             onClick={() => selectRange("ALL")}
           >
             <ArrowCounterClockwise />
           </button>
+          {followMode === "manual" && (
+            <button className="text-button" onClick={followLatest}>
+              Follow latest
+            </button>
+          )}
           {!candles && (
             <>
               <label className="check">
